@@ -11,10 +11,9 @@
 #include <WiFiClientSecure.h>
 #include <UniversalTelegramBot.h>
 #include <ArduinoJson.h>
-#include <WiFiManager.h> // DIUBAH: Tambahan Library WiFiManager
+#include <WiFiManager.h> 
 
 // --- KONFIGURASI TELEGRAM ---
-// DIUBAH: SSID dan Password dihapus karena akan diatur lewat HP
 #define BOT_TOKEN "8967102523:AAFrH6Wu4AIudm8s_8Q8cnSSTmX-4TQo5Ao"
 #define CHAT_ID "916594429"
 
@@ -22,10 +21,7 @@ WiFiClientSecure secured_client;
 UniversalTelegramBot bot(BOT_TOKEN, secured_client);
 Preferences preferences; 
 
-// --- TAMBAHAN VARIABEL MODE OFFLINE ---
 bool isOfflineMode = false; 
-
-// Menggunakan uint8_t agar hemat memori (0 = Manual, 1 = Sensor, 2 = Terjadwal)
 volatile uint8_t modeSistem = 2; // Bawaan: Terjadwal
 
 // --- VARIABEL TANGGAL TANAM ---
@@ -40,19 +36,24 @@ int tanggalSistemUntukReset = -1;
 String jamTerakhirSiram = "--:--";
 
 // --- VARIABEL POMPA ---
-// DIUBAH: Menghapus 'const' agar debit bisa diubah via Telegram
 float debitPompaPerDetik = 3.0; 
 int targetVolumeML = 250; 
 bool isPompaTerjadwalMenyala = false;
 unsigned long waktuMulaiPompaTerjadwal = 0;
-int jamTerakhirDisiram = -1; // Akan ditimpa oleh memori EEPROM
-
-// TAMBAHAN: Variabel untuk penanda jeda pesan Telegram
+int jamTerakhirDisiram = -1; 
 bool pesanJadwalTerkirim = true; 
 
-// --- TAMBAHAN KODE ANTRIAN PESAN ---
+// --- VARIABEL ANTRIAN PESAN TELEGRAM ---
 String pesanAntrian = ""; 
 volatile bool kirimPesanSekarang = false;
+
+// ==========================================
+// --- [BARU] VARIABEL MANAJEMEN KIPAS ---
+// ==========================================
+enum StateKipas { KIPAS_IDLE, KIPAS_ON_CYCLE, KIPAS_OFF_CYCLE };
+StateKipas statusKipas = KIPAS_IDLE;
+unsigned long waktuMulaiKipas = 0;
+const unsigned long DURASI_SIKLUS_KIPAS = 3600000; // 1 Jam (3.600.000 ms)
 
 // --- Konfigurasi OLED & Sensor ---
 #define SCREEN_WIDTH 128
@@ -64,21 +65,19 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
-// --- PIN SENSOR TANAH ---
 #define SOIL_PIN_A 32 
-#define SOIL_PIN_B 35 // Menggunakan Pin 35 (ADC1 - Input Only)
+#define SOIL_PIN_B 35 
 const int BATAS_KERING = 3400; 
 const int BATAS_BASAH = 1400;  
 
-#define VOLT_PIN 34 // Pin Sensor Tegangan
+#define VOLT_PIN 34 
 float teganganAki = 0.0;
 int persenAki = 0;
-float faktorKalibrasi = 5.05; // Angka kalibrasi Anda sebelumnya
-
-// --- TAMBAHAN VARIABEL PEREDAM KEJUT (SMOOTHING) ---
+float faktorKalibrasi = 5.05; 
 float teganganAkiSmoothed = 0.0;
 bool pertamaKaliBacaAki = true;
 
+// Relai Active LOW
 #define RELAY1 25 // Kipas
 #define RELAY2 26 // Pompa Air
 
@@ -158,23 +157,19 @@ unsigned long jedaGantiLayar = 10000;
 uint8_t halamanAktif = 0; 
 unsigned long waktuSebelumnyaSensor = 0;
 const unsigned long jedaUpdateSensor = 2000; 
-
-// --- TAMBAHAN TIMER AUTO-RECONNECT WIFI ---
 unsigned long waktuSebelumnyaWiFi = 0;
-const unsigned long jedaCekWiFi = 120000; // Cek koneksi Wi-Fi setiap 120 detik
+const unsigned long jedaCekWiFi = 120000; 
 
 // ==========================================
 // FUNGSI MENCATAT INFO PENYIRAMAN TERAKHIR
 // ==========================================
 void catatPenyiraman() {
   DateTime now = rtc.now();
-  
   if (tanggalSistemUntukReset != now.day()) {
     penyiramanKe = 0;
     tanggalSistemUntukReset = now.day();
     preferences.putInt("tglReset", tanggalSistemUntukReset);
   }
-  
   penyiramanKe++;
   preferences.putInt("siramKe", penyiramanKe); 
   
@@ -203,6 +198,55 @@ int hitungTargetVolume(int hst) {
 }
 
 // ==========================================
+// --- [BARU] FUNGSI MANAJEMEN KIPAS HEMAT DAYA ---
+// ==========================================
+void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long waktuSaatIni) {
+    // 1. Cek Histeresis Bawah (Batas Aman Mutlak)
+    if (suhuAktual < 38.0 && lembabAktual < 82.0) {
+        if (statusKipas != KIPAS_IDLE) {
+            digitalWrite(RELAY1, HIGH); // Matikan Kipas (Active LOW)
+            statusKipas = KIPAS_IDLE;
+            pesanAntrian = "✅ *Kipas Otomatis MATI*\nSuhu & Kelembaban telah kembali ke batas aman.\nSuhu: " + String(suhuAktual,1) + "°C | Lembab: " + String(lembabAktual,1) + "%";
+            kirimPesanSekarang = true;
+        }
+        return; 
+    }
+
+    // 2. State Machine Siklus Kipas
+    switch (statusKipas) {
+        case KIPAS_IDLE:
+            if (suhuAktual >= 40.0 || lembabAktual >= 85.0) {
+                digitalWrite(RELAY1, LOW); // Nyalakan Kipas
+                waktuMulaiKipas = waktuSaatIni;
+                statusKipas = KIPAS_ON_CYCLE;
+                pesanAntrian = "⚠️ *Kipas Otomatis NYALA*\nKondisi ekstrem terdeteksi. Memulai siklus ON 1 Jam.\nSuhu: " + String(suhuAktual,1) + "°C | Lembab: " + String(lembabAktual,1) + "%";
+                kirimPesanSekarang = true;
+            }
+            break;
+
+        case KIPAS_ON_CYCLE:
+            if (waktuSaatIni - waktuMulaiKipas >= DURASI_SIKLUS_KIPAS) {
+                digitalWrite(RELAY1, HIGH); // Matikan Kipas Sementara
+                waktuMulaiKipas = waktuSaatIni;
+                statusKipas = KIPAS_OFF_CYCLE;
+                pesanAntrian = "🛑 *Kipas JEDA (Hemat Baterai)*\nSiklus ON 1 jam selesai. Kipas diistirahatkan selama 1 jam ke depan.";
+                kirimPesanSekarang = true;
+            }
+            break;
+
+        case KIPAS_OFF_CYCLE:
+            if (waktuSaatIni - waktuMulaiKipas >= DURASI_SIKLUS_KIPAS) {
+                digitalWrite(RELAY1, LOW); // Nyalakan Kipas Kembali
+                waktuMulaiKipas = waktuSaatIni;
+                statusKipas = KIPAS_ON_CYCLE;
+                pesanAntrian = "💨 *Kipas Otomatis NYALA KEMBALI*\nJeda selesai. Suhu/Lembab masih di atas batas aman. Memulai siklus ON berikutnya.";
+                kirimPesanSekarang = true;
+            }
+            break;
+    }
+}
+
+// ==========================================
 // FUNGSI MEMBACA PESAN TELEGRAM
 // ==========================================
 void handleNewMessages(int numNewMessages) {
@@ -211,74 +255,64 @@ void handleNewMessages(int numNewMessages) {
     if (chat_id != CHAT_ID) { bot.sendMessage(chat_id, "Akses ditolak!", ""); continue; }
     String text = bot.messages[i].text;
 
-    if (text == "/start") {
-      String welcome; welcome.reserve(400); 
+if (text == "/start") {
+      String welcome; welcome.reserve(500); 
       welcome = "Sistem Greenhouse Melon Capstone!\n\n";
       welcome += "Pilih Mode Operasi:\n";
-      welcome += "/auto - Mode Sensor Otomatis\n";
+      welcome += "/auto - Mode Otomatis\n";
       welcome += "/jadwal - Mode Terjadwal\n";
       welcome += "/manual - Mode Manual\n\n";
+      
       welcome += "--- Manajemen Tanam ---\n";
       welcome += "Ubah tanggal tanam dengan format:\n";
       welcome += "/settanggal YYYY-MM-DD\n";
-      welcome += "(Contoh: /settanggal 2026-05-20)\n\n";
-      // --- TAMBAHAN TEKS BANTUAN KALIBRASI POMPA ---
+      welcome += "(Contoh: /settanggal 2026-06-19)\n\n";
+      
       welcome += "--- Kalibrasi Pompa ---\n";
       welcome += "Ketik detik yg dibutuhkan utk 100ml air:\n";
-      welcome += "/kalibrasi [detik] (Contoh: /kalibrasi 33)\n\n";
+      welcome += "/kalibrasi [detik] (Contoh: /kalibrasi 33.5)\n\n";
+      
       welcome += "--- Perintah Lain ---\n";
       welcome += "/status - Cek kondisi terkini\n";
       welcome += "/kipas_on | /kipas_off\n";
       welcome += "/pompa_on | /pompa_off\n";
+      
       bot.sendMessage(chat_id, welcome, "");
     }
     else if (text.startsWith("/settanggal ")) {
       String dateStr = text.substring(12);
       dateStr.trim();
-      
       if (dateStr.length() == 10 && dateStr.charAt(4) == '-' && dateStr.charAt(7) == '-') {
         TAHUN_TANAM = dateStr.substring(0, 4).toInt();
         BULAN_TANAM = dateStr.substring(5, 7).toInt();
         TANGGAL_TANAM = dateStr.substring(8, 10).toInt();
-        
         preferences.putInt("tahun", TAHUN_TANAM);
         preferences.putInt("bulan", BULAN_TANAM);
         preferences.putInt("tanggal", TANGGAL_TANAM);
-
         penyiramanKe = 0;
         jamTerakhirSiram = "--:--";
         jamTerakhirDisiram = -1; 
-        
         preferences.putInt("siramKe", penyiramanKe);
         preferences.putString("jamSiram", jamTerakhirSiram);
         preferences.putInt("jamDisiram", jamTerakhirDisiram);
-        
-        bot.sendMessage(chat_id, "✅ Tanggal Tanam berhasil diubah menjadi: " + dateStr + "\n🔄 Histori penyiraman telah di-reset untuk siklus baru!", "");
+        bot.sendMessage(chat_id, "✅ Tanggal Tanam diubah menjadi: " + dateStr + "\n🔄 Histori di-reset!", "");
       } else {
-        bot.sendMessage(chat_id, "⚠️ Format salah!\nGunakan format YYYY-MM-DD\nContoh: /settanggal 2026-05-20", "");
+        bot.sendMessage(chat_id, "⚠️ Format salah!\nGunakan format YYYY-MM-DD", "");
       }
     }
-    // --- TAMBAHAN LOGIKA PERINTAH KALIBRASI POMPA ---
     else if (text.startsWith("/kalibrasi ")) {
-      String detikStr = text.substring(11); // Mengambil angka setelah kata "/kalibrasi "
+      String detikStr = text.substring(11); 
       detikStr.trim();
       float detikMasuk = detikStr.toFloat();
-
       if (detikMasuk > 0) {
-        // Rumus: 100 ml dibagi waktu yang dimasukkan = ml per detik
         debitPompaPerDetik = 100.0 / detikMasuk;
-        
-        // Simpan ke memori permanen ESP32
         preferences.putFloat("debitPompa", debitPompaPerDetik);
-        
         String balas = "✅ Kalibrasi Pompa Berhasil!\n";
-        balas += "Waktu untuk 100ml : " + String(detikMasuk, 1) + " detik\n";
-        balas += "Debit Baru Sistem : " + String(debitPompaPerDetik, 2) + " ml/detik\n\n";
-        balas += "Jadwal penyiraman selanjutnya akan otomatis menyesuaikan dengan debit baru ini.";
-        
+        balas += "Waktu 100ml : " + String(detikMasuk, 1) + " detik\n";
+        balas += "Debit Baru : " + String(debitPompaPerDetik, 2) + " ml/detik\n";
         bot.sendMessage(chat_id, balas, "");
       } else {
-        bot.sendMessage(chat_id, "⚠️ Format salah atau angka 0!\nGunakan format: /kalibrasi [detik]\nContoh jika 100ml butuh 33.5 detik:\n/kalibrasi 33.5", "");
+        bot.sendMessage(chat_id, "⚠️ Format salah! Contoh: /kalibrasi 33.5", "");
       }
     }
     else if (text == "/status") {
@@ -287,41 +321,30 @@ void handleNewMessages(int numNewMessages) {
       status += "📅 Tgl Tanam: " + String(TANGGAL_TANAM) + "/" + String(BULAN_TANAM) + "/" + String(TAHUN_TANAM) + "\n";
       status += "🌱 Usia: " + String(hst_sekarang) + " HST\n";
       status += "🎯 Target Siram: " + String(targetVolumeML) + " ml\n";
-      
-      // --- TAMBAHAN TAMPILAN DEBIT POMPA ---
       status += "⚙️ Debit Pompa: " + String(debitPompaPerDetik, 2) + " ml/dtk\n";
-      
-      status += "💧 Terakhir Siram: " + jamTerakhirSiram + " (Ke-" + String(penyiramanKe) + " hr ini)\n\n";
-      
+      status += "💧 Terakhir Siram: " + jamTerakhirSiram + " (Ke-" + String(penyiramanKe) + ")\n\n";
       status += "🌡 Suhu: " + String(suhu, 1) + " °C\n";
       status += "💧 Lembab Udara: " + String(lembab, 1) + " %\n";
       status += "🌱 L.Tanah A: " + String(persenSoilA) + " % | B: " + String(persenSoilB) + " %\n";
       status += "🔋 Tegangan Aki: " + String(teganganAki, 1) + " V (" + String(persenAki) + "%)\n\n";
-      
       String namaMode = (modeSistem == 1) ? "OTOMATIS (SENSOR)" : (modeSistem == 2) ? "TERJADWAL" : "MANUAL";
       status += "⚙️ Mode: " + namaMode + "\n";
       status += "💨 Kipas: " + String(digitalRead(RELAY1) == LOW ? "NYALA" : "MATI") + "\n";
       status += "💦 Pompa: " + String(digitalRead(RELAY2) == LOW ? "NYALA" : "MATI") + "\n";
-      
       status += "📶 Wi-Fi: " + WiFi.SSID() + "\n";
-      
       bot.sendMessage(chat_id, status, "");
     }
     else if (text == "/auto") { modeSistem = 1; bot.sendMessage(chat_id, "✅ Sistem diubah ke Mode SENSOR.", ""); }
     else if (text == "/jadwal") { modeSistem = 2; bot.sendMessage(chat_id, "⏱ Sistem diubah ke Mode JADWAL (SOP Nutrisi).", ""); }
-    else if (text == "/manual") { modeSistem = 0; bot.sendMessage(chat_id, "⚙️ Sistem diubah ke Mode MANUAL.", ""); }
+    else if (text == "/manual") { modeSistem = 0; statusKipas = KIPAS_IDLE; bot.sendMessage(chat_id, "⚙️ Sistem diubah ke Mode MANUAL.", ""); }
+    
     else if (text == "/kipas_on") { if(modeSistem == 0) { digitalWrite(RELAY1, LOW); bot.sendMessage(chat_id, "💨 Kipas NYALA.", ""); } else { bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); } }
     else if (text == "/kipas_off") { if(modeSistem == 0) { digitalWrite(RELAY1, HIGH); bot.sendMessage(chat_id, "🛑 Kipas MATI.", ""); } else { bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); } }
     else if (text == "/pompa_on") { 
       if(modeSistem == 0) { 
-        if (digitalRead(RELAY2) == HIGH) { 
-          digitalWrite(RELAY2, LOW); 
-          catatPenyiraman();
-        }
+        if (digitalRead(RELAY2) == HIGH) { digitalWrite(RELAY2, LOW); catatPenyiraman(); }
         bot.sendMessage(chat_id, "💦 Pompa NYALA.", ""); 
-      } else { 
-        bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); 
-      } 
+      } else { bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); } 
     }
     else if (text == "/pompa_off") { if(modeSistem == 0) { digitalWrite(RELAY2, HIGH); bot.sendMessage(chat_id, "🛑 Pompa MATI.", ""); } else { bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); } }
   }
@@ -334,7 +357,7 @@ void TaskTelegramCode( void * pvParameters ) {
   for(;;) {
     if (!isOfflineMode && WiFi.status() == WL_CONNECTED) {
       if (kirimPesanSekarang && pesanAntrian != "") {
-        bot.sendMessage(CHAT_ID, pesanAntrian, "");
+        bot.sendMessage(CHAT_ID, pesanAntrian, "Markdown"); // Menggunakan mode Markdown
         pesanAntrian = ""; 
         kirimPesanSekarang = false; 
       }
@@ -355,10 +378,7 @@ void setup() {
   TAHUN_TANAM = preferences.getInt("tahun", 2026);
   BULAN_TANAM = preferences.getInt("bulan", 5);
   TANGGAL_TANAM = preferences.getInt("tanggal", 20);
-
-  // --- TAMBAHAN MEMANGGIL MEMORI DEBIT POMPA ---
   debitPompaPerDetik = preferences.getFloat("debitPompa", 3.0); 
-
   penyiramanKe = preferences.getInt("siramKe", 0);
   tanggalSistemUntukReset = preferences.getInt("tglReset", -1);
   jamTerakhirSiram = preferences.getString("jamSiram", "--:--");
@@ -369,7 +389,7 @@ void setup() {
 
   pinMode(RELAY1, OUTPUT);
   pinMode(RELAY2, OUTPUT);
-  digitalWrite(RELAY1, HIGH); 
+  digitalWrite(RELAY1, HIGH); // Active LOW: HIGH = Mati
   digitalWrite(RELAY2, HIGH);
 
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { for(;;); }
@@ -387,7 +407,6 @@ void setup() {
   if (!wm.autoConnect("GreenFlow-Config")) {
     Serial.println("Gagal terhubung Wi-Fi atau Timeout! Menjalankan mode Offline...");
     isOfflineMode = true; 
-    
     display.clearDisplay();
     display.setCursor(5, 20); display.print("Wi-Fi Gagal!");
     display.setCursor(5, 40); display.print("Mode OFFLINE Aktif");
@@ -417,27 +436,20 @@ void loop() {
 
   if (waktuSekarang - waktuSebelumnyaWiFi >= jedaCekWiFi) {
     waktuSebelumnyaWiFi = waktuSekarang;
-    
     if (WiFi.status() != WL_CONNECTED) {
-      if (!isOfflineMode) {
-        Serial.println("Wi-Fi terputus! Layar beralih ke Mode OFFLINE.");
-        isOfflineMode = true; 
-      }
+      if (!isOfflineMode) { isOfflineMode = true; }
       WiFi.reconnect(); 
-    } 
-    else {
+    } else {
       if (isOfflineMode) {
-        Serial.println("Wi-Fi kembali tersambung!");
         isOfflineMode = false; 
-        
         pesanAntrian = "🔄 Sistem GreenFlow kembali ONLINE!";
         kirimPesanSekarang = true;
       }
     }
   }
 
+  // --- LOGIKA POMPA TERJADWAL ---
   if (modeSistem == 2 && isPompaTerjadwalMenyala) {
-    // --- DIUBAH: RUMUS MENGGUNAKAN VARIABEL DEBIT POMPA YANG BARU ---
     unsigned long durasiSiramMS = ((targetVolumeML / debitPompaPerDetik) * 1000) + 2000;
     
     if (waktuSekarang - waktuMulaiPompaTerjadwal >= durasiSiramMS) {
@@ -454,6 +466,7 @@ void loop() {
     }
   }
 
+  // --- PEMBACAAN SENSOR 2 DETIK SEKALI ---
   if (waktuSekarang - waktuSebelumnyaSensor >= jedaUpdateSensor) {
     waktuSebelumnyaSensor = waktuSekarang;
 
@@ -485,49 +498,58 @@ void loop() {
     int teganganInt = round(teganganAki * 100); 
     persenAki = constrain(map(teganganInt, 1160, 1280, 0, 100), 0, 100);
 
-    if (modeSistem == 1) { 
+    // ======================================================
+    // EKSEKUSI LOGIKA KIPAS & POMPA BERDASARKAN MODE
+    // ======================================================
+    if (modeSistem == 1 || modeSistem == 2) { 
+      // Kipas diatur oleh State Machine Hemat Daya (Baik di Mode Auto maupun Jadwal)
       if (!isnan(suhu) && !isnan(lembab)) {
-        if (suhu > 32.0 || lembab > 87.0) digitalWrite(RELAY1, LOW);  
-        else if (suhu < 31.0 && lembab < 86.0) digitalWrite(RELAY1, HIGH); 
+         kontrolManajemenKipas(suhu, lembab, waktuSekarang);
       }
       
-      if (persenSoilA < 45 || persenSoilB < 45) {
-        if (digitalRead(RELAY2) == HIGH) { 
-          digitalWrite(RELAY2, LOW);
-          catatPenyiraman();
+      // Logika Pompa Mode Auto
+      if (modeSistem == 1) {
+        if (persenSoilA < 45 || persenSoilB < 45) {
+          if (digitalRead(RELAY2) == HIGH) { 
+            digitalWrite(RELAY2, LOW);
+            catatPenyiraman();
+            pesanAntrian = "💦 Pompa otomatis NYALA (Tanah kering)";
+            kirimPesanSekarang = true;
+          }
+        } else if (persenSoilA > 75 && persenSoilB > 75) {
+          if (digitalRead(RELAY2) == LOW) {
+            digitalWrite(RELAY2, HIGH);  
+            pesanAntrian = "🛑 Pompa otomatis MATI (Tanah sudah basah)";
+            kirimPesanSekarang = true;
+          }
         }
-      } else if (persenSoilA > 75 && persenSoilB > 75) {
-        digitalWrite(RELAY2, HIGH);  
-      }
-    } 
-    else if (modeSistem == 2) { 
-      if (!isnan(suhu) && !isnan(lembab)) {
-        if (suhu > 32.0 || lembab > 87.0) digitalWrite(RELAY1, LOW);  
-        else if (suhu < 31.0 && lembab < 86.0) digitalWrite(RELAY1, HIGH); 
-      }
-      bool waktuSiramSiang = (jamSekarang == 7 || jamSekarang == 9 || jamSekarang == 10 || 
-                              jamSekarang == 11 || jamSekarang == 13 || jamSekarang == 15 || jamSekarang == 17);
-      
-      bool waktuSiramMalam = (jamSekarang == 0 && now.minute() >= 15);
-      if (waktuSiramSiang || waktuSiramMalam) {
-        if (jamTerakhirDisiram != jamSekarang) {
-          jamTerakhirDisiram = jamSekarang;
-          preferences.putInt("jamDisiram", jamTerakhirDisiram);
-          
-          isPompaTerjadwalMenyala = true;
-          waktuMulaiPompaTerjadwal = millis();
-          pesanJadwalTerkirim = false; 
-          
-          digitalWrite(RELAY2, LOW); 
-          catatPenyiraman(); 
+      } 
+      // Logika Pompa Mode Terjadwal
+      else if (modeSistem == 2) {
+        bool waktuSiramSiang = (jamSekarang == 7 || jamSekarang == 9 || jamSekarang == 10 || 
+                                jamSekarang == 11 || jamSekarang == 13 || jamSekarang == 15 || jamSekarang == 17);
+        bool waktuSiramMalam = (jamSekarang == 0 && now.minute() >= 15);
+        
+        if (waktuSiramSiang || waktuSiramMalam) {
+          if (jamTerakhirDisiram != jamSekarang) {
+            jamTerakhirDisiram = jamSekarang;
+            preferences.putInt("jamDisiram", jamTerakhirDisiram);
+            
+            isPompaTerjadwalMenyala = true;
+            waktuMulaiPompaTerjadwal = millis();
+            pesanJadwalTerkirim = false; 
+            
+            digitalWrite(RELAY2, LOW); 
+            catatPenyiraman(); 
+          }
         }
       }
-    }
-
-    if (modeSistem != 2) {
+    } else {
+      // Jika Mode Manual (modeSistem == 0), pastikan variabel pompa otomatis mati
       isPompaTerjadwalMenyala = false;
     }
 
+    // --- PENGELOLAAN LAYAR OLED ---
     if (waktuSekarang - waktuSebelumnyaHalaman >= jedaGantiLayar) {
       waktuSekarang = millis();
       waktuSebelumnyaHalaman = waktuSekarang;
@@ -540,111 +562,85 @@ void loop() {
 
     display.clearDisplay();
 
+    // Halaman 0
     if (halamanAktif == 0) {
       display.setTextSize(1); display.setCursor(20, 0); display.print("WAKTU SAAT INI");
       display.drawLine(0, 9, 128, 9, WHITE);
-
       display.setTextSize(2); display.setCursor(34, 20); 
-      if(now.hour() < 10) display.print('0');
-      display.print(now.hour(), DEC); display.print(':');
-      if(now.minute() < 10) display.print('0');
-      display.print(now.minute(), DEC);
-
+      if(now.hour() < 10) display.print('0'); display.print(now.hour(), DEC); display.print(':');
+      if(now.minute() < 10) display.print('0'); display.print(now.minute(), DEC);
       display.setTextSize(1); display.setCursor(28, 45); 
-      if(now.day() < 10) display.print('0'); 
-      display.print(now.day(), DEC); display.print('/');
-      if(now.month() < 10) display.print('0'); 
-      display.print(now.month(), DEC); display.print('/');
+      if(now.day() < 10) display.print('0'); display.print(now.day(), DEC); display.print('/');
+      if(now.month() < 10) display.print('0'); display.print(now.month(), DEC); display.print('/');
       display.print(now.year(), DEC);
-      
       if(isOfflineMode) { display.setCursor(110, 0); display.print("[X]"); }
     } 
+    // Halaman 1
     else if (halamanAktif == 1) {
       display.setTextSize(1); display.setCursor(12, 0); display.print("SUHU & KELEMBABAN");
       display.drawLine(0, 9, 128, 9, WHITE);
-
       if (isnan(suhu) || isnan(lembab)) {
         display.setCursor(10, 30); display.print("Gagal baca sensor!");
       } else {
         display.setTextSize(1); display.setCursor(0, 20); display.print("Suhu  : ");
         display.setTextSize(2); display.print(suhu, 1); 
         display.setTextSize(1); display.print(" C"); display.drawCircle(113, 20, 2, WHITE); 
-
         display.setTextSize(1); display.setCursor(0, 42); display.print("Lembab: ");
         display.setTextSize(2); display.print(lembab, 1);
         display.setTextSize(1); display.print(" %");
       }
     }
+    // Halaman 2
     else if (halamanAktif == 2) {
       display.setTextSize(1); display.setCursor(15, 0); display.print("KELEMBABAN TANAH");
       display.drawLine(0, 9, 128, 9, WHITE);
-
       display.setTextSize(1); display.setCursor(0, 20); display.print("Sns A: ");
       display.setTextSize(2); display.print(persenSoilA); display.setTextSize(1); display.print("%");
-      
       display.setTextSize(1); display.setCursor(0, 45); display.print("Sns B: ");
       display.setTextSize(2); display.print(persenSoilB); display.setTextSize(1); display.print("%");
     }
+    // Halaman 3
     else if (halamanAktif == 3) {
       display.setTextSize(1); display.setCursor(22, 0); display.print("MODE & KONEKSI");
       display.drawLine(0, 9, 128, 9, WHITE);
-
       display.setTextSize(2);
       if (modeSistem == 1) { display.setCursor(15, 20); display.print("OTOMATIS"); } 
       else if (modeSistem == 2) { display.setCursor(10, 20); display.print("TERJADWAL"); } 
       else { display.setCursor(30, 20); display.print("MANUAL"); }
-
       display.setTextSize(1);
-      if (isOfflineMode) { 
-        display.setCursor(15, 48); 
-        display.print("Jaringan: OFFLINE"); 
-      } else { 
-        display.setCursor(18, 48); 
-        display.print("Jaringan: ONLINE"); 
-      }
+      if (isOfflineMode) { display.setCursor(15, 48); display.print("Jaringan: OFFLINE"); } 
+      else { display.setCursor(18, 48); display.print("Jaringan: ONLINE"); }
     }
+    // Halaman 4
     else if (halamanAktif == 4) {
       display.setTextSize(1); display.setCursor(18, 0); display.print("INFO PENYIRAMAN");
       display.drawLine(0, 9, 128, 9, WHITE);
-
       display.setTextSize(1); display.setCursor(0, 20); display.print("Terakhir: ");
       display.setTextSize(2); display.print(jamTerakhirSiram);
-      
       display.setTextSize(1); display.setCursor(0, 45); 
-      if (penyiramanKe == 0) {
-        display.print("Belum ada penyiraman");
-      } else {
-        display.print("Siraman ke-");
-        display.print(penyiramanKe);
-        display.print(" hari ini");
-      }
+      if (penyiramanKe == 0) { display.print("Belum ada penyiraman"); } 
+      else { display.print("Siraman ke-"); display.print(penyiramanKe); display.print(" hari ini"); }
     }
+    // Halaman 5
     else if (halamanAktif == 5) {
       display.setTextSize(1); display.setCursor(25, 0); display.print("INFO TANAMAN");
       display.drawLine(0, 9, 128, 9, WHITE);
-
       display.setTextSize(1); display.setCursor(0, 20); display.print("Tanam: ");
-      if(TANGGAL_TANAM < 10) display.print('0');
-      display.print(TANGGAL_TANAM); display.print('/');
-      if(BULAN_TANAM < 10) display.print('0');
-      display.print(BULAN_TANAM); display.print('/');
+      if(TANGGAL_TANAM < 10) display.print('0'); display.print(TANGGAL_TANAM); display.print('/');
+      if(BULAN_TANAM < 10) display.print('0'); display.print(BULAN_TANAM); display.print('/');
       display.print(TAHUN_TANAM);
-      
       display.setTextSize(1); display.setCursor(0, 45); display.print("Usia : ");
-      display.setTextSize(2); display.print(hst_sekarang);
-      display.setTextSize(1); display.print(" HST");
+      display.setTextSize(2); display.print(hst_sekarang); display.setTextSize(1); display.print(" HST");
     }
+    // Halaman 6
     else if (halamanAktif == 6) {
       display.setTextSize(1); display.setCursor(15, 0); display.print("INFO SISTEM DAYA");
       display.drawLine(0, 9, 128, 9, WHITE);
-
       display.setTextSize(1); display.setCursor(0, 20); display.print("Tegangan: ");
       display.setTextSize(2); display.print(teganganAki, 1); display.setTextSize(1); display.print(" V");
-      
       display.setTextSize(1); display.setCursor(0, 45); display.print("Kapasitas:");
       display.setTextSize(2); display.print(persenAki); display.setTextSize(1); display.print(" %");
     }
-
     display.display();
   }
 }
