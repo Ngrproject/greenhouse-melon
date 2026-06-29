@@ -473,6 +473,19 @@ void loop() {
     DateTime now = rtc.now();
     int jamSekarang = now.hour();
 
+    // FITUR AUTO-RESTART (PEMBERSIHAN MEMORI 2 HARI SEKALI)
+    // ======================================================
+    if (now.day() % 2 == 0 && now.hour() == 2 && now.minute() == 0) {
+      if (millis() > 300000) {
+        pesanAntrian = "🔄 *Maintenance Sistem*\nMelakukan Auto-Restart rutin untuk menyegarkan memori RAM. Sistem akan kembali online dalam beberapa detik...";
+        kirimPesanSekarang = true;
+        
+        delay(5000); 
+        ESP.restart(); 
+      }
+    }
+    // ======================================================
+
     DateTime tglTanam(TAHUN_TANAM, BULAN_TANAM, TANGGAL_TANAM, 0, 0, 0);
     TimeSpan selisihWaktu = now - tglTanam;
     hst_sekarang = selisihWaktu.days() + 1; 
