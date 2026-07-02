@@ -48,7 +48,16 @@ String pesanAntrian = "";
 volatile bool kirimPesanSekarang = false;
 
 // ==========================================
-// --- [BARU] VARIABEL MANAJEMEN KIPAS ---
+// --- [BARU] VARIABEL FITUR TAMBAHAN (VPD & REKAP) ---
+// ==========================================
+float suhuMax = 0.0;
+float suhuMin = 100.0;
+bool laporanTerkirim = false;
+bool peringatanAkiTerkirim = false;
+float vpd = 0.0;
+
+// ==========================================
+// --- VARIABEL MANAJEMEN KIPAS ---
 // ==========================================
 enum StateKipas { KIPAS_IDLE, KIPAS_ON_CYCLE, KIPAS_OFF_CYCLE };
 StateKipas statusKipas = KIPAS_IDLE;
@@ -88,7 +97,6 @@ int persenSoilB = 0;
 
 // --- Data Bitmap Logo (128x64) ---
 const unsigned char epd_bitmap_logo [] PROGMEM = {
-  // ... (KODE BITMAP LOGO ANDA TETAP SAMA) ...
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
@@ -198,13 +206,12 @@ int hitungTargetVolume(int hst) {
 }
 
 // ==========================================
-// --- [BARU] FUNGSI MANAJEMEN KIPAS HEMAT DAYA ---
+// --- FUNGSI MANAJEMEN KIPAS HEMAT DAYA ---
 // ==========================================
 void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long waktuSaatIni) {
-    // 1. Cek Histeresis Bawah (Batas Aman Mutlak)
     if (suhuAktual < 38.0 && lembabAktual < 82.0) {
         if (statusKipas != KIPAS_IDLE) {
-            digitalWrite(RELAY1, HIGH); // Matikan Kipas (Active LOW)
+            digitalWrite(RELAY1, HIGH); 
             statusKipas = KIPAS_IDLE;
             pesanAntrian = "✅ *Kipas Otomatis MATI*\nSuhu & Kelembaban telah kembali ke batas aman.\nSuhu: " + String(suhuAktual,1) + "°C | Lembab: " + String(lembabAktual,1) + "%";
             kirimPesanSekarang = true;
@@ -212,11 +219,10 @@ void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long w
         return; 
     }
 
-    // 2. State Machine Siklus Kipas
     switch (statusKipas) {
         case KIPAS_IDLE:
             if (suhuAktual >= 40.0 || lembabAktual >= 85.0) {
-                digitalWrite(RELAY1, LOW); // Nyalakan Kipas
+                digitalWrite(RELAY1, LOW); 
                 waktuMulaiKipas = waktuSaatIni;
                 statusKipas = KIPAS_ON_CYCLE;
                 pesanAntrian = "⚠️ *Kipas Otomatis NYALA*\nKondisi ekstrem terdeteksi. Memulai siklus ON 1 Jam.\nSuhu: " + String(suhuAktual,1) + "°C | Lembab: " + String(lembabAktual,1) + "%";
@@ -226,7 +232,7 @@ void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long w
 
         case KIPAS_ON_CYCLE:
             if (waktuSaatIni - waktuMulaiKipas >= DURASI_SIKLUS_KIPAS) {
-                digitalWrite(RELAY1, HIGH); // Matikan Kipas Sementara
+                digitalWrite(RELAY1, HIGH); 
                 waktuMulaiKipas = waktuSaatIni;
                 statusKipas = KIPAS_OFF_CYCLE;
                 pesanAntrian = "🛑 *Kipas JEDA (Hemat Baterai)*\nSiklus ON 1 jam selesai. Kipas diistirahatkan selama 1 jam ke depan.";
@@ -236,7 +242,7 @@ void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long w
 
         case KIPAS_OFF_CYCLE:
             if (waktuSaatIni - waktuMulaiKipas >= DURASI_SIKLUS_KIPAS) {
-                digitalWrite(RELAY1, LOW); // Nyalakan Kipas Kembali
+                digitalWrite(RELAY1, LOW); 
                 waktuMulaiKipas = waktuSaatIni;
                 statusKipas = KIPAS_ON_CYCLE;
                 pesanAntrian = "💨 *Kipas Otomatis NYALA KEMBALI*\nJeda selesai. Suhu/Lembab masih di atas batas aman. Memulai siklus ON berikutnya.";
@@ -255,7 +261,7 @@ void handleNewMessages(int numNewMessages) {
     if (chat_id != CHAT_ID) { bot.sendMessage(chat_id, "Akses ditolak!", ""); continue; }
     String text = bot.messages[i].text;
 
-if (text == "/start") {
+    if (text == "/start") {
       String welcome; welcome.reserve(500); 
       welcome = "Sistem Greenhouse Melon Capstone!\n\n";
       welcome += "Pilih Mode Operasi:\n";
@@ -325,6 +331,8 @@ if (text == "/start") {
       status += "💧 Terakhir Siram: " + jamTerakhirSiram + " (Ke-" + String(penyiramanKe) + ")\n\n";
       status += "🌡 Suhu: " + String(suhu, 1) + " °C\n";
       status += "💧 Lembab Udara: " + String(lembab, 1) + " %\n";
+      // --- PENAMBAHAN INFO VPD DI STATUS ---
+      status += "🧬 Angka VPD: " + String(vpd, 2) + " kPa\n";
       status += "🌱 L.Tanah A: " + String(persenSoilA) + " % | B: " + String(persenSoilB) + " %\n";
       status += "🔋 Tegangan Aki: " + String(teganganAki, 1) + " V (" + String(persenAki) + "%)\n\n";
       String namaMode = (modeSistem == 1) ? "OTOMATIS (SENSOR)" : (modeSistem == 2) ? "TERJADWAL" : "MANUAL";
@@ -357,7 +365,7 @@ void TaskTelegramCode( void * pvParameters ) {
   for(;;) {
     if (!isOfflineMode && WiFi.status() == WL_CONNECTED) {
       if (kirimPesanSekarang && pesanAntrian != "") {
-        bot.sendMessage(CHAT_ID, pesanAntrian, "Markdown"); // Menggunakan mode Markdown
+        bot.sendMessage(CHAT_ID, pesanAntrian, "Markdown"); 
         pesanAntrian = ""; 
         kirimPesanSekarang = false; 
       }
@@ -389,7 +397,7 @@ void setup() {
 
   pinMode(RELAY1, OUTPUT);
   pinMode(RELAY2, OUTPUT);
-  digitalWrite(RELAY1, HIGH); // Active LOW: HIGH = Mati
+  digitalWrite(RELAY1, HIGH); 
   digitalWrite(RELAY2, HIGH);
 
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { for(;;); }
@@ -474,17 +482,14 @@ void loop() {
     int jamSekarang = now.hour();
 
     // FITUR AUTO-RESTART (PEMBERSIHAN MEMORI 2 HARI SEKALI)
-    // ======================================================
     if (now.day() % 2 == 0 && now.hour() == 2 && now.minute() == 0) {
       if (millis() > 300000) {
         pesanAntrian = "🔄 *Maintenance Sistem*\nMelakukan Auto-Restart rutin untuk menyegarkan memori RAM. Sistem akan kembali online dalam beberapa detik...";
         kirimPesanSekarang = true;
-        
         delay(5000); 
         ESP.restart(); 
       }
     }
-    // ======================================================
 
     DateTime tglTanam(TAHUN_TANAM, BULAN_TANAM, TANGGAL_TANAM, 0, 0, 0);
     TimeSpan selisihWaktu = now - tglTanam;
@@ -512,15 +517,60 @@ void loop() {
     persenAki = constrain(map(teganganInt, 1160, 1280, 0, 100), 0, 100);
 
     // ======================================================
+    // [BARU] FITUR ANALISIS VPD, PERINGATAN BATERAI & REKAP
+    // ======================================================
+    
+    // 1. MENGHITUNG VPD & PENCATATAN SUHU
+    if (!isnan(suhu) && !isnan(lembab)) {
+      float svp = 0.61078 * exp((17.27 * suhu) / (suhu + 237.3));
+      float avp = svp * (lembab / 100.0);
+      vpd = svp - avp; 
+      
+      if (suhu > suhuMax) suhuMax = suhu;
+      if (suhu < suhuMin) suhuMin = suhu;
+    }
+
+    // 2. PERINGATAN BATERAI KRITIS
+    if (teganganAki < 11.5 && !peringatanAkiTerkirim && teganganAki > 5.0) {
+      pesanAntrian = "⚠️ *PERINGATAN DAYA KRITIS* ⚠️\nTegangan aki turun hingga " + String(teganganAki, 1) + "V.\nMohon periksa sistem kelistrikan (Panel Surya / ATS)!";
+      kirimPesanSekarang = true;
+      peringatanAkiTerkirim = true; 
+    } else if (teganganAki >= 12.0) {
+      peringatanAkiTerkirim = false; 
+    }
+
+    // 3. LAPORAN HARIAN OTOMATIS (Setiap jam 18:00)
+    if (now.hour() == 18 && now.minute() == 0) {
+      if (!laporanTerkirim) {
+        int totalAirSatuSiklus = targetVolumeML * penyiramanKe; 
+        
+        pesanAntrian = "📝 *REKAP HARIAN GREENFLOW* (HST " + String(hst_sekarang) + ")\n\n";
+        pesanAntrian += "🌡 Suhu Tertinggi: " + String(suhuMax, 1) + " °C\n";
+        pesanAntrian += "🌡 Suhu Terendah : " + String(suhuMin, 1) + " °C\n";
+        pesanAntrian += "💦 Total Siram   : " + String(penyiramanKe) + " kali\n";
+        pesanAntrian += "💧 Estimasi Air  : " + String(totalAirSatuSiklus) + " ml\n\n";
+        pesanAntrian += "Selamat beristirahat! 🌙";
+        
+        kirimPesanSekarang = true;
+        laporanTerkirim = true; 
+      }
+    } 
+    // Reset variabel rekap di tengah malam (Jam 00:00)
+    else if (now.hour() == 0 && now.minute() == 0) {
+      suhuMax = 0.0;
+      suhuMin = 100.0;
+      laporanTerkirim = false;
+    }
+    // ======================================================
+
+    // ======================================================
     // EKSEKUSI LOGIKA KIPAS & POMPA BERDASARKAN MODE
     // ======================================================
     if (modeSistem == 1 || modeSistem == 2) { 
-      // Kipas diatur oleh State Machine Hemat Daya (Baik di Mode Auto maupun Jadwal)
       if (!isnan(suhu) && !isnan(lembab)) {
          kontrolManajemenKipas(suhu, lembab, waktuSekarang);
       }
       
-      // Logika Pompa Mode Auto
       if (modeSistem == 1) {
         if (persenSoilA < 45 || persenSoilB < 45) {
           if (digitalRead(RELAY2) == HIGH) { 
@@ -537,7 +587,6 @@ void loop() {
           }
         }
       } 
-      // Logika Pompa Mode Terjadwal
       else if (modeSistem == 2) {
         bool waktuSiramSiang = (jamSekarang == 7 || jamSekarang == 9 || jamSekarang == 10 || 
                                 jamSekarang == 11 || jamSekarang == 13 || jamSekarang == 15 || jamSekarang == 17);
@@ -558,7 +607,6 @@ void loop() {
         }
       }
     } else {
-      // Jika Mode Manual (modeSistem == 0), pastikan variabel pompa otomatis mati
       isPompaTerjadwalMenyala = false;
     }
 
@@ -575,7 +623,6 @@ void loop() {
 
     display.clearDisplay();
 
-    // Halaman 0
     if (halamanAktif == 0) {
       display.setTextSize(1); display.setCursor(20, 0); display.print("WAKTU SAAT INI");
       display.drawLine(0, 9, 128, 9, WHITE);
@@ -588,7 +635,6 @@ void loop() {
       display.print(now.year(), DEC);
       if(isOfflineMode) { display.setCursor(110, 0); display.print("[X]"); }
     } 
-    // Halaman 1
     else if (halamanAktif == 1) {
       display.setTextSize(1); display.setCursor(12, 0); display.print("SUHU & KELEMBABAN");
       display.drawLine(0, 9, 128, 9, WHITE);
@@ -603,7 +649,6 @@ void loop() {
         display.setTextSize(1); display.print(" %");
       }
     }
-    // Halaman 2
     else if (halamanAktif == 2) {
       display.setTextSize(1); display.setCursor(15, 0); display.print("KELEMBABAN TANAH");
       display.drawLine(0, 9, 128, 9, WHITE);
@@ -612,7 +657,6 @@ void loop() {
       display.setTextSize(1); display.setCursor(0, 45); display.print("Sns B: ");
       display.setTextSize(2); display.print(persenSoilB); display.setTextSize(1); display.print("%");
     }
-    // Halaman 3
     else if (halamanAktif == 3) {
       display.setTextSize(1); display.setCursor(22, 0); display.print("MODE & KONEKSI");
       display.drawLine(0, 9, 128, 9, WHITE);
@@ -624,7 +668,6 @@ void loop() {
       if (isOfflineMode) { display.setCursor(15, 48); display.print("Jaringan: OFFLINE"); } 
       else { display.setCursor(18, 48); display.print("Jaringan: ONLINE"); }
     }
-    // Halaman 4
     else if (halamanAktif == 4) {
       display.setTextSize(1); display.setCursor(18, 0); display.print("INFO PENYIRAMAN");
       display.drawLine(0, 9, 128, 9, WHITE);
@@ -634,7 +677,6 @@ void loop() {
       if (penyiramanKe == 0) { display.print("Belum ada penyiraman"); } 
       else { display.print("Siraman ke-"); display.print(penyiramanKe); display.print(" hari ini"); }
     }
-    // Halaman 5
     else if (halamanAktif == 5) {
       display.setTextSize(1); display.setCursor(25, 0); display.print("INFO TANAMAN");
       display.drawLine(0, 9, 128, 9, WHITE);
@@ -645,7 +687,6 @@ void loop() {
       display.setTextSize(1); display.setCursor(0, 45); display.print("Usia : ");
       display.setTextSize(2); display.print(hst_sekarang); display.setTextSize(1); display.print(" HST");
     }
-    // Halaman 6
     else if (halamanAktif == 6) {
       display.setTextSize(1); display.setCursor(15, 0); display.print("INFO SISTEM DAYA");
       display.drawLine(0, 9, 128, 9, WHITE);
