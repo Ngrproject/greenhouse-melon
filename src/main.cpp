@@ -280,7 +280,7 @@ void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long w
 
     switch (statusKipas) {
         case KIPAS_IDLE:
-            if (suhuAktual >= 38.0 || lembabAktual >= 85.0) {
+            if (suhuAktual >= 40.0 || lembabAktual >= 85.0) {
                 digitalWrite(RELAY1, LOW); 
                 waktuMulaiKipas = waktuSaatIni;
                 statusKipas = KIPAS_ON_CYCLE;
@@ -441,10 +441,17 @@ void handleNewMessages(int numNewMessages) {
 void TaskTelegramCode( void * pvParameters ) {
   for(;;) {
     if (!isOfflineMode && WiFi.status() == WL_CONNECTED) {
+      // KODE BARU (ANTI-DOUBLE SEND):
       if (kirimPesanSekarang && pesanAntrian != "") {
-        bot.sendMessage(CHAT_ID, pesanAntrian, "Markdown"); 
+        // 1. Kunci dan amankan pesan ke memori lokal
+        String pesanDikirim = pesanAntrian; 
+        
+        // 2. Segera kosongkan antrean global agar Core 1 aman
         pesanAntrian = ""; 
         kirimPesanSekarang = false; 
+        
+        // 3. Eksekusi pengiriman pesan (bebas hambatan/delay)
+        bot.sendMessage(CHAT_ID, pesanDikirim, "Markdown"); 
       }
       
       int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
@@ -567,7 +574,7 @@ void loop() {
     int jamSekarang = now.hour();
 
     // FITUR AUTO-RESTART (PEMBERSIHAN MEMORI SETIAP HARI JAM 05:00)
-    if (now.hour() == 5 && now.minute() == 0) {
+    if (now.hour() == 6 && now.minute() == 0) {
       if (millis() > 300000) {
         pesanAntrian = "🔄 *Maintenance Sistem*\nMelakukan Auto-Restart rutin harian untuk menyegarkan memori RAM. Sistem akan kembali online dalam beberapa detik...";
         kirimPesanSekarang = true;
