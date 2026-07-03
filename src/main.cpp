@@ -196,6 +196,38 @@ bool cekJadwalSiram(int hst, int jam, int menit) {
 }
 
 // ==========================================
+// FUNGSI MENCARI JADWAL SIRAM SELANJUTNYA
+// ==========================================
+String dapatkanJadwalSelanjutnya(int hst, int jam, int menit) {
+  // Mengubah jam dan menit menjadi total menit agar mudah dibandingkan
+  int waktuSekarang = (jam * 60) + menit; 
+  
+  // Array jadwal dalam format total menit (Contoh: 07:00 = 7 * 60 = 420)
+  int jadwalFase1[] = {15, 420, 600, 780, 1020}; // 00:15, 07:00, 10:00, 13:00, 17:00
+  int jadwalFase2[] = {15, 420, 600, 660, 780, 1020}; // + 11:00
+  int jadwalFase3[] = {15, 420, 540, 600, 660, 780, 900, 1020}; // + 09:00, 15:00
+  
+  int* jadwalAktif;
+  int jumlahJadwal = 0;
+  
+  if (hst >= 1 && hst <= 10) { jadwalAktif = jadwalFase1; jumlahJadwal = 5; } 
+  else if (hst >= 11 && hst <= 17) { jadwalAktif = jadwalFase2; jumlahJadwal = 6; } 
+  else { jadwalAktif = jadwalFase3; jumlahJadwal = 8; }
+  
+  for (int i = 0; i < jumlahJadwal; i++) {
+    if (jadwalAktif[i] > waktuSekarang) {
+      int j = jadwalAktif[i] / 60;
+      int m = jadwalAktif[i] % 60;
+      char buf[6];
+      sprintf(buf, "%02d:%02d", j, m);
+      return String(buf);
+    }
+  }
+  // Jika semua jadwal hari ini sudah terlewat, maka selanjutnya adalah besok
+  return "00:15 (Besok)"; 
+}
+
+// ==========================================
 // FUNGSI MENCATAT INFO PENYIRAMAN TERAKHIR
 // ==========================================
 void catatPenyiraman() {
@@ -236,7 +268,7 @@ int hitungTargetVolume(int hst) {
 // --- FUNGSI MANAJEMEN KIPAS HEMAT DAYA ---
 // ==========================================
 void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long waktuSaatIni) {
-    if (suhuAktual < 38.0 && lembabAktual < 82.0) {
+    if (suhuAktual < 37.0 && lembabAktual < 82.0) {
         if (statusKipas != KIPAS_IDLE) {
             digitalWrite(RELAY1, HIGH); 
             statusKipas = KIPAS_IDLE;
@@ -248,7 +280,7 @@ void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long w
 
     switch (statusKipas) {
         case KIPAS_IDLE:
-            if (suhuAktual >= 40.0 || lembabAktual >= 85.0) {
+            if (suhuAktual >= 38.0 || lembabAktual >= 85.0) {
                 digitalWrite(RELAY1, LOW); 
                 waktuMulaiKipas = waktuSaatIni;
                 statusKipas = KIPAS_ON_CYCLE;
@@ -350,18 +382,30 @@ void handleNewMessages(int numNewMessages) {
       }
     }
     else if (text == "/status") {
+      // Ambil waktu saat ini untuk memprediksi jadwal berikutnya
+      DateTime nowStatus = rtc.now();
+      String infoSelanjutnya = "-";
+      if (modeSistem == 2) {
+        infoSelanjutnya = dapatkanJadwalSelanjutnya(hst_sekarang, nowStatus.hour(), nowStatus.minute());
+      } else {
+        infoSelanjutnya = (modeSistem == 1) ? "Menunggu Sensor" : "Mode Manual";
+      }
+
       String status; status.reserve(500); 
       status = "📊 Status Greenhouse:\n\n";
       status += "📅 Tgl Tanam: " + String(TANGGAL_TANAM) + "/" + String(BULAN_TANAM) + "/" + String(TAHUN_TANAM) + "\n";
       status += "🌱 Usia: " + String(hst_sekarang) + " HST\n";
       status += "🎯 Target Siram: " + String(targetVolumeML) + " ml\n";
       status += "⚙️ Debit Pompa: " + String(debitPompaPerDetik, 2) + " ml/dtk\n";
-      status += "💧 Terakhir Siram: " + jamTerakhirSiram + " (Ke-" + String(penyiramanKe) + ")\n\n";
+      status += "💧 Terakhir Siram: " + jamTerakhirSiram + " (Ke-" + String(penyiramanKe) + ")\n";
+      status += "🔜 Selanjutnya: " + infoSelanjutnya + "\n\n"; // <--- INFO BARU MUNCUL DI SINI
+      
       status += "🌡 Suhu: " + String(suhu, 1) + " °C\n";
       status += "💧 Lembab Udara: " + String(lembab, 1) + " %\n";
       status += "🧬 Angka VPD: " + String(vpd, 2) + " kPa\n";
       status += "🌱 L.Tanah A: " + String(persenSoilA) + " % | B: " + String(persenSoilB) + " %\n";
       status += "🔋 Tegangan Aki: " + String(teganganAki, 1) + " V (" + String(persenAki) + "%)\n\n";
+      
       String namaMode = (modeSistem == 1) ? "OTOMATIS (SENSOR)" : (modeSistem == 2) ? "TERJADWAL" : "MANUAL";
       status += "⚙️ Mode: " + namaMode + "\n";
       status += "💨 Kipas: " + String(digitalRead(RELAY1) == LOW ? "NYALA" : "MATI") + "\n";
