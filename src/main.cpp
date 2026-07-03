@@ -46,6 +46,7 @@ bool pesanJadwalTerkirim = true;
 // --- VARIABEL ANTRIAN PESAN TELEGRAM ---
 String pesanAntrian = ""; 
 volatile bool kirimPesanSekarang = false;
+volatile bool flagRestart = false; // <--- PENAMBAHAN FIX BOOTLOOP TELEGRAM
 
 // ==========================================
 // --- [BARU] VARIABEL FITUR TAMBAHAN (VPD & REKAP) ---
@@ -153,7 +154,6 @@ const unsigned char epd_bitmap_logo [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
@@ -167,6 +167,33 @@ unsigned long waktuSebelumnyaSensor = 0;
 const unsigned long jedaUpdateSensor = 2000; 
 unsigned long waktuSebelumnyaWiFi = 0;
 const unsigned long jedaCekWiFi = 120000; 
+
+// ==========================================
+// FUNGSI CEK JADWAL JAM BERDASARKAN HST
+// ==========================================
+bool cekJadwalSiram(int hst, int jam, int menit) {
+  // FASE 1: HST 1 - 10 (5x siram)
+  // Jadwal: 07:00, 10:00, 13:00, 17:00, dan 00:15
+  if (hst >= 1 && hst <= 10) {
+    if (jam == 7 || jam == 10 || jam == 13 || jam == 17) return true;
+    if (jam == 0 && menit >= 15) return true;
+    return false;
+  }
+  // FASE 2: HST 11 - 17 (6x siram)
+  // Jadwal: 07:00, 10:00, 11:00, 13:00, 17:00, dan 00:15
+  else if (hst >= 11 && hst <= 17) {
+    if (jam == 7 || jam == 10 || jam == 11 || jam == 13 || jam == 17) return true;
+    if (jam == 0 && menit >= 15) return true;
+    return false;
+  }
+  // FASE 3: HST 18 ke atas (8x siram)
+  // Jadwal: 07:00, 09:00, 10:00, 11:00, 13:00, 15:00, 17:00, dan 00:15
+  else {
+    if (jam == 7 || jam == 9 || jam == 10 || jam == 11 || jam == 13 || jam == 15 || jam == 17) return true;
+    if (jam == 0 && menit >= 15) return true;
+    return false;
+  }
+}
 
 // ==========================================
 // FUNGSI MENCATAT INFO PENYIRAMAN TERAKHIR
@@ -282,6 +309,7 @@ void handleNewMessages(int numNewMessages) {
       welcome += "/status - Cek kondisi terkini\n";
       welcome += "/kipas_on | /kipas_off\n";
       welcome += "/pompa_on | /pompa_off\n";
+      welcome += "/restart - Mulai ulang sistem\n";
       
       bot.sendMessage(chat_id, welcome, "");
     }
@@ -331,7 +359,6 @@ void handleNewMessages(int numNewMessages) {
       status += "💧 Terakhir Siram: " + jamTerakhirSiram + " (Ke-" + String(penyiramanKe) + ")\n\n";
       status += "🌡 Suhu: " + String(suhu, 1) + " °C\n";
       status += "💧 Lembab Udara: " + String(lembab, 1) + " %\n";
-      // --- PENAMBAHAN INFO VPD DI STATUS ---
       status += "🧬 Angka VPD: " + String(vpd, 2) + " kPa\n";
       status += "🌱 L.Tanah A: " + String(persenSoilA) + " % | B: " + String(persenSoilB) + " %\n";
       status += "🔋 Tegangan Aki: " + String(teganganAki, 1) + " V (" + String(persenAki) + "%)\n\n";
@@ -355,6 +382,12 @@ void handleNewMessages(int numNewMessages) {
       } else { bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); } 
     }
     else if (text == "/pompa_off") { if(modeSistem == 0) { digitalWrite(RELAY2, HIGH); bot.sendMessage(chat_id, "🛑 Pompa MATI.", ""); } else { bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); } }
+    
+    // --- [PERUBAHAN FIX BOOTLOOP] ---
+    else if (text == "/restart") {
+      bot.sendMessage(chat_id, "🔄 Memulai ulang sistem (Restart) dari jarak jauh...\nMohon tunggu sekitar 10 detik hingga sistem kembali online.", "");
+      flagRestart = true; // Hanya memberikan tanda (flag), ESP32 tidak langsung dimatikan di sini
+    }
   }
 }
 
@@ -369,10 +402,18 @@ void TaskTelegramCode( void * pvParameters ) {
         pesanAntrian = ""; 
         kirimPesanSekarang = false; 
       }
+      
       int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
       while (numNewMessages) {
         handleNewMessages(numNewMessages);
-        numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+        // Di baris inilah server Telegram diberitahu bahwa pesan telah selesai dibaca
+        numNewMessages = bot.getUpdates(bot.last_message_received + 1); 
+      }
+      
+      // --- [PERUBAHAN FIX BOOTLOOP] EKSEKUSI RESTART YANG AMAN ---
+      if (flagRestart) {
+        delay(10000); // Waktu ekstra 10 detik untuk mengatasi Wi-Fi lambat
+        ESP.restart();
       }
     }
     vTaskDelay(3000 / portTICK_PERIOD_MS); 
@@ -481,12 +522,12 @@ void loop() {
     DateTime now = rtc.now();
     int jamSekarang = now.hour();
 
-    // FITUR AUTO-RESTART (PEMBERSIHAN MEMORI 2 HARI SEKALI)
-    if (now.day() % 2 == 0 && now.hour() == 2 && now.minute() == 0) {
+    // FITUR AUTO-RESTART (PEMBERSIHAN MEMORI SETIAP HARI JAM 05:00)
+    if (now.hour() == 5 && now.minute() == 0) {
       if (millis() > 300000) {
-        pesanAntrian = "🔄 *Maintenance Sistem*\nMelakukan Auto-Restart rutin untuk menyegarkan memori RAM. Sistem akan kembali online dalam beberapa detik...";
+        pesanAntrian = "🔄 *Maintenance Sistem*\nMelakukan Auto-Restart rutin harian untuk menyegarkan memori RAM. Sistem akan kembali online dalam beberapa detik...";
         kirimPesanSekarang = true;
-        delay(5000); 
+        delay(10000); 
         ESP.restart(); 
       }
     }
@@ -588,11 +629,9 @@ void loop() {
         }
       } 
       else if (modeSistem == 2) {
-        bool waktuSiramSiang = (jamSekarang == 7 || jamSekarang == 9 || jamSekarang == 10 || 
-                                jamSekarang == 11 || jamSekarang == 13 || jamSekarang == 15 || jamSekarang == 17);
-        bool waktuSiramMalam = (jamSekarang == 0 && now.minute() >= 15);
+        bool waktunyaSiram = cekJadwalSiram(hst_sekarang, jamSekarang, now.minute());
         
-        if (waktuSiramSiang || waktuSiramMalam) {
+        if (waktunyaSiram) {
           if (jamTerakhirDisiram != jamSekarang) {
             jamTerakhirDisiram = jamSekarang;
             preferences.putInt("jamDisiram", jamTerakhirDisiram);
