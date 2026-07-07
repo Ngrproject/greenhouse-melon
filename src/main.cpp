@@ -414,9 +414,9 @@ void handleNewMessages(int numNewMessages) {
       // --- LOGIKA STATUS DAYA ---
       String statusDaya = "";
       if (teganganAki > 13.2) {
-        statusDaya = "CHARGE ☀️";
+        statusDaya = "Charging ☀️";
       } else if (teganganAki >= 11.6) {
-        statusDaya = "DISCHARGE 🔋";
+        statusDaya = "Discharge 🔋";
       } else {
         statusDaya = "PLN 🔌";
       }
@@ -811,11 +811,13 @@ void loop() {
       // Baris 3: Status Daya (PLN/Charge/Discharge)
       display.setTextSize(1); display.setCursor(0, 55); display.print("Status  : ");
       if (teganganAki > 13.2) {
-        display.print("CHARGE");
+        display.print("CHARGING");
       } else if (teganganAki >= 11.6) {
         display.print("DISCHARGE");
       } else {
         display.print("PLN");
       }
     }
+    display.display();
+  }
 }
