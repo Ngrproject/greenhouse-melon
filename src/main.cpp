@@ -410,7 +410,19 @@ void handleNewMessages(int numNewMessages) {
       status += "💧 Lembab Udara: " + String(lembab, 1) + " %\n";
       status += "🧬 Angka VPD: " + String(vpd, 2) + " kPa\n";
       status += "🌱 L.Tanah A: " + String(persenSoilA) + " % | B: " + String(persenSoilB) + " %\n";
-      status += "🔋 Tegangan Aki: " + String(teganganAki, 1) + " V (" + String(persenAki) + "%)\n\n";
+      
+      // --- LOGIKA STATUS DAYA ---
+      String statusDaya = "";
+      if (teganganAki > 13.2) {
+        statusDaya = "CHARGE ☀️";
+      } else if (teganganAki >= 11.6) {
+        statusDaya = "DISCHARGE 🔋";
+      } else {
+        statusDaya = "PLN 🔌";
+      }
+      
+      status += "🔋 Tegangan Aki: " + String(teganganAki, 1) + " V (" + String(persenAki) + "%)\n";
+      status += "⚡ Status Daya: " + statusDaya + "\n\n";
       
       String namaMode = (modeSistem == 1) ? "OTOMATIS (SENSOR)" : (modeSistem == 2) ? "TERJADWAL" : "MANUAL";
       status += "⚙️ Mode: " + namaMode + "\n";
@@ -787,11 +799,23 @@ void loop() {
     else if (halamanAktif == 6) {
       display.setTextSize(1); display.setCursor(15, 0); display.print("INFO SISTEM DAYA");
       display.drawLine(0, 9, 128, 9, WHITE);
-      display.setTextSize(1); display.setCursor(0, 20); display.print("Tegangan: ");
+      
+      // Baris 1: Tegangan
+      display.setTextSize(1); display.setCursor(0, 15); display.print("Tegangan: ");
       display.setTextSize(2); display.print(teganganAki, 1); display.setTextSize(1); display.print(" V");
-      display.setTextSize(1); display.setCursor(0, 45); display.print("Kapasitas:");
+      
+      // Baris 2: Kapasitas Baterai
+      display.setTextSize(1); display.setCursor(0, 35); display.print("Baterai : ");
       display.setTextSize(2); display.print(persenAki); display.setTextSize(1); display.print(" %");
+
+      // Baris 3: Status Daya (PLN/Charge/Discharge)
+      display.setTextSize(1); display.setCursor(0, 55); display.print("Status  : ");
+      if (teganganAki > 13.2) {
+        display.print("CHARGE");
+      } else if (teganganAki >= 11.6) {
+        display.print("DISCHARGE");
+      } else {
+        display.print("PLN");
+      }
     }
-    display.display();
-  }
 }
