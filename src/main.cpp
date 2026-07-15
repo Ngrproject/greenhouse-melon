@@ -63,7 +63,8 @@ float vpd = 0.0;
 enum StateKipas { KIPAS_IDLE, KIPAS_ON_CYCLE, KIPAS_OFF_CYCLE };
 StateKipas statusKipas = KIPAS_IDLE;
 unsigned long waktuMulaiKipas = 0;
-const unsigned long DURASI_SIKLUS_KIPAS = 3600000; // 1 Jam (3.600.000 ms)
+const unsigned long DURASI_KIPAS_ON = 7200000;  // 2 Jam (7.200.000 ms)
+const unsigned long DURASI_KIPAS_OFF = 3600000; // 1 Jam (3.600.000 ms)
 
 // --- Konfigurasi OLED & Sensor ---
 #define SCREEN_WIDTH 128
@@ -269,7 +270,7 @@ int hitungTargetVolume(int hst) {
 // ==========================================
 // [PERUBAHAN]: Menambahkan parameter 'int jamSekarang' untuk mendeteksi siang/malam
 void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long waktuSaatIni, int jamSekarang) {
-    if (suhuAktual < 37.0 && lembabAktual < 82.0) {
+    if (suhuAktual < 37.0 && lembabAktual < 78.0) {
         if (statusKipas != KIPAS_IDLE) {
             digitalWrite(RELAY1, HIGH); 
             statusKipas = KIPAS_IDLE;
@@ -284,7 +285,7 @@ void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long w
 
     switch (statusKipas) {
         case KIPAS_IDLE:
-            if (suhuAktual >= 39.0 || lembabAktual >= 85.0) {
+            if (suhuAktual >= 39.0 || lembabAktual >= 80.0) {
                 digitalWrite(RELAY1, LOW); 
                 waktuMulaiKipas = waktuSaatIni;
                 statusKipas = KIPAS_ON_CYCLE;
@@ -294,19 +295,19 @@ void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long w
             break;
 
         case KIPAS_ON_CYCLE:
-            // Jeda 1 jam HANYA dieksekusi JIKA MALAM HARI
-            if (isMalamHari && (waktuSaatIni - waktuMulaiKipas >= DURASI_SIKLUS_KIPAS)) {
+            // Jeda dieksekusi HANYA JIKA MALAM HARI setelah kipas menyala selama durasi ON
+            if (isMalamHari && (waktuSaatIni - waktuMulaiKipas >= DURASI_KIPAS_ON)) {
                 digitalWrite(RELAY1, HIGH); 
                 waktuMulaiKipas = waktuSaatIni;
                 statusKipas = KIPAS_OFF_CYCLE;
-                pesanAntrian = "🛑 *Kipas JEDA (Hemat Baterai)*\nSiklus ON 1 jam selesai. Kipas diistirahatkan karena saat ini malam hari.";
+                pesanAntrian = "🛑 *Kipas JEDA (Hemat Baterai)*\nSiklus ON 2 jam selesai. Kipas diistirahatkan selama 1 jam.";
                 kirimPesanSekarang = true;
             }
             break;
 
         case KIPAS_OFF_CYCLE:
-            // Kipas menyala kembali jika jeda 1 jam selesai, ATAU jika hari sudah pagi (sinar matahari mulai masuk)
-            if (!isMalamHari || (waktuSaatIni - waktuMulaiKipas >= DURASI_SIKLUS_KIPAS)) {
+            // Kipas menyala kembali jika jeda OFF selesai, ATAU jika hari sudah pagi
+            if (!isMalamHari || (waktuSaatIni - waktuMulaiKipas >= DURASI_KIPAS_OFF)) {
                 digitalWrite(RELAY1, LOW); 
                 waktuMulaiKipas = waktuSaatIni;
                 statusKipas = KIPAS_ON_CYCLE;
@@ -592,7 +593,7 @@ void loop() {
     int jamSekarang = now.hour();
 
     // FITUR AUTO-RESTART (PEMBERSIHAN MEMORI SETIAP HARI JAM 05:00)
-    if (now.hour() == 6 && now.minute() == 0) {
+    if (now.hour() == 2 && now.minute() == 0) {
       if (millis() > 300000) {
         pesanAntrian = "🔄 *Maintenance Sistem*\nMelakukan Auto-Restart rutin harian untuk menyegarkan memori RAM. Sistem akan kembali online dalam beberapa detik...";
         kirimPesanSekarang = true;
