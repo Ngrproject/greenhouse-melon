@@ -6,65 +6,86 @@
 #include <DHT.h>
 #include <Preferences.h> 
 
-// --- TAMBAHAN LIBRARY TELEGRAM & WIFI ---
+// --- LIBRARY KONEKTIVITAS & FIREBASE RTDB ---
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <UniversalTelegramBot.h>
+#include <Firebase_ESP_Client.h>
 #include <ArduinoJson.h>
 #include <WiFiManager.h> 
 
-// --- KONFIGURASI TELEGRAM ---
-#define BOT_TOKEN "8967102523:AAFrH6Wu4AIudm8s_8Q8cnSSTmX-4TQo5Ao"
-#define CHAT_ID "916594429"
+// =========================================================================
+// --- PENTING: KREDENSIAL FIREBASE ---
+// =========================================================================
+#define FIREBASE_HOST "https://greenflow-be349-default-rtdb.asia-southeast1.firebasedatabase.app/" 
+#define FIREBASE_AUTH "tjmsp5xRbjN8J1rjJDChDnrBro0Vum8uJtZ9D9oj"
+#define DEVICE_ID "greenflow-001"
 
-WiFiClientSecure secured_client;
-UniversalTelegramBot bot(BOT_TOKEN, secured_client);
+// Objek Inti Firebase
+FirebaseData fbdoStore;
+FirebaseData fbdoStreamActuators;
+FirebaseData fbdoStreamConfig; 
+FirebaseAuth auth;
+FirebaseConfig configfb;
 Preferences preferences; 
 
 bool isOfflineMode = false; 
-volatile uint8_t modeSistem = 2; // Bawaan: Terjadwal
+volatile uint8_t modeSistem = 2; // (0=Manual, 1=Auto/Sensor, 2=Terjadwal)
 
-// --- VARIABEL TANGGAL TANAM ---
+// --- VARIABEL DINAMIS DARI WEB ---
+int hst_sekarang = 0; 
+int targetVolumeML = 250; 
+float debitPompaPerDetik = 3.0; 
+float detikKalibrasiPompa = 33.3; // Telah ditambahkan
+float thresholdSuhuKipas = 39.0;    
+float thresholdLembabKipas = 80.0;  
+float thresholdSuhuAman = 37.0;     
+float thresholdLembabAman = 78.0;   
+int batasTanahKering = 45; 
+int batasTanahBasah = 75;  
+
+// Fitur Baru Battery Saver & Restart
+bool batterySaverStatus = false; // Telah ditambahkan
+String batterySaverTime = "night_only"; // Telah ditambahkan
+bool autoRestartStatus = false; // Telah ditambahkan
+
+unsigned long DURASI_KIPAS_ON = 7200000;  
+unsigned long DURASI_KIPAS_OFF = 3600000; 
+int jamAutoRestart = 2;             
+int menitAutoRestart = 0;
+
+// --- VARIABEL INTERNAL MEMORI PREFERENCES ---
 int TAHUN_TANAM;
 int BULAN_TANAM;
 int TANGGAL_TANAM;
-int hst_sekarang = 0; 
-
-// --- VARIABEL INFO PENYIRAMAN ---
 int penyiramanKe = 0;
 int tanggalSistemUntukReset = -1; 
 String jamTerakhirSiram = "--:--";
 
-// --- VARIABEL POMPA ---
-float debitPompaPerDetik = 3.0; 
-int targetVolumeML = 250; 
+// --- VARIABEL KONTROL POMPA & COMMANDS ---
 bool isPompaTerjadwalMenyala = false;
 unsigned long waktuMulaiPompaTerjadwal = 0;
 int jamTerakhirDisiram = -1; 
 bool pesanJadwalTerkirim = true; 
 
-// --- VARIABEL ANTRIAN PESAN TELEGRAM ---
+unsigned long lastProcessedCmd = 0; // Telah ditambahkan untuk validasi command terbaru
+String cmdToDelete = ""; // Telah ditambahkan untuk penghapusan commands
+volatile bool pendingCmdDelete = false; // Telah ditambahkan
+
+// --- VARIABEL ANTRIAN PESAN LOGS ---
 String pesanAntrian = ""; 
 volatile bool kirimPesanSekarang = false;
-volatile bool flagRestart = false; // <--- PENAMBAHAN FIX BOOTLOOP TELEGRAM
+volatile bool flagRestart = false; 
 
-// ==========================================
-// --- [BARU] VARIABEL FITUR TAMBAHAN (VPD & REKAP) ---
-// ==========================================
+// --- VARIABEL ANALISIS TELEMETRI ---
 float suhuMax = 0.0;
 float suhuMin = 100.0;
 bool laporanTerkirim = false;
 bool peringatanAkiTerkirim = false;
 float vpd = 0.0;
 
-// ==========================================
 // --- VARIABEL MANAJEMEN KIPAS ---
-// ==========================================
 enum StateKipas { KIPAS_IDLE, KIPAS_ON_CYCLE, KIPAS_OFF_CYCLE };
 StateKipas statusKipas = KIPAS_IDLE;
 unsigned long waktuMulaiKipas = 0;
-const unsigned long DURASI_KIPAS_ON = 7200000;  // 2 Jam (7.200.000 ms)
-const unsigned long DURASI_KIPAS_OFF = 3600000; // 1 Jam (3.600.000 ms)
 
 // --- Konfigurasi OLED & Sensor ---
 #define SCREEN_WIDTH 128
@@ -153,8 +174,6 @@ const unsigned char epd_bitmap_logo [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
@@ -167,70 +186,104 @@ uint8_t halamanAktif = 0;
 unsigned long waktuSebelumnyaSensor = 0;
 const unsigned long jedaUpdateSensor = 2000; 
 unsigned long waktuSebelumnyaWiFi = 0;
-const unsigned long jedaCekWiFi = 120000; 
+const unsigned long jedaCekWiFi = 75000; 
+unsigned long waktuSebelumnyaTelemetri = 0;
+const unsigned long jedaKirimTelemetri = 60000; 
 
-// ==========================================
-// FUNGSI CEK JADWAL JAM BERDASARKAN HST
-// ==========================================
-bool cekJadwalSiram(int hst, int jam, int menit) {
-  // FASE 1: HST 1 - 10 (5x siram)
-  // Jadwal: 07:00, 10:00, 13:00, 17:00, dan 00:15
-  if (hst >= 1 && hst <= 10) {
-    if (jam == 7 || jam == 10 || jam == 13 || jam == 17) return true;
-    if (jam == 0 && menit >= 15) return true;
-    return false;
-  }
-  // FASE 2: HST 11 - 17 (6x siram)
-  // Jadwal: 07:00, 10:00, 11:00, 13:00, 17:00, dan 00:15
-  else if (hst >= 11 && hst <= 17) {
-    if (jam == 7 || jam == 10 || jam == 11 || jam == 13 || jam == 17) return true;
-    if (jam == 0 && menit >= 15) return true;
-    return false;
-  }
-  // FASE 3: HST 18 ke atas (8x siram)
-  // Jadwal: 07:00, 09:00, 10:00, 11:00, 13:00, 15:00, 17:00, dan 00:15
-  else {
-    if (jam == 7 || jam == 9 || jam == 10 || jam == 11 || jam == 13 || jam == 15 || jam == 17) return true;
-    if (jam == 0 && menit >= 15) return true;
-    return false;
-  }
-}
-
-// ==========================================
-// FUNGSI MENCARI JADWAL SIRAM SELANJUTNYA
-// ==========================================
-String dapatkanJadwalSelanjutnya(int hst, int jam, int menit) {
-  // Mengubah jam dan menit menjadi total menit agar mudah dibandingkan
-  int waktuSekarang = (jam * 60) + menit; 
-  
-  // Array jadwal dalam format total menit (Contoh: 07:00 = 7 * 60 = 420)
-  int jadwalFase1[] = {15, 420, 600, 780, 1020}; // 00:15, 07:00, 10:00, 13:00, 17:00
-  int jadwalFase2[] = {15, 420, 600, 660, 780, 1020}; // + 11:00
-  int jadwalFase3[] = {15, 420, 540, 600, 660, 780, 900, 1020}; // + 09:00, 15:00
-  
-  int* jadwalAktif;
-  int jumlahJadwal = 0;
-  
-  if (hst >= 1 && hst <= 10) { jadwalAktif = jadwalFase1; jumlahJadwal = 5; } 
-  else if (hst >= 11 && hst <= 17) { jadwalAktif = jadwalFase2; jumlahJadwal = 6; } 
-  else { jadwalAktif = jadwalFase3; jumlahJadwal = 8; }
-  
-  for (int i = 0; i < jumlahJadwal; i++) {
-    if (jadwalAktif[i] > waktuSekarang) {
-      int j = jadwalAktif[i] / 60;
-      int m = jadwalAktif[i] % 60;
-      char buf[6];
-      sprintf(buf, "%02d:%02d", j, m);
-      return String(buf);
+// =========================================================================
+// LOGIKA PARSING JADWAL SOP DAN TARGET AIR SECARA DINAMIS DARI WEB
+// =========================================================================
+int hitungTargetVolumeDinamis(int hst) {
+  String jsonSchedules = preferences.getString("sched_data", "");
+  if (jsonSchedules != "") {
+    StaticJsonDocument<1536> doc;
+    DeserializationError error = deserializeJson(doc, jsonSchedules);
+    if (!error && doc.is<JsonArray>()) {
+      JsonArray arr = doc.as<JsonArray>();
+      for (JsonObject v : arr) {
+        int hstMulai = v["hst_mulai"];
+        int hstSelesai = v["hst_selesai"];
+        if (hst >= hstMulai && hst <= hstSelesai) {
+          return v["target_ml"]; 
+        }
+      }
     }
   }
-  // Jika semua jadwal hari ini sudah terlewat, maka selanjutnya adalah besok
-  return "00:15 (Besok)"; 
+  if (hst == 1) return 156;
+  else if (hst >= 2 && hst <= 5) return 250;
+  else if (hst >= 6 && hst <= 10) return 300;
+  else if (hst >= 11 && hst <= 17) return 292;
+  else if (hst >= 18 && hst <= 25) return 219;
+  return 250;
 }
 
-// ==========================================
-// FUNGSI MENCATAT INFO PENYIRAMAN TERAKHIR
-// ==========================================
+bool cekJadwalSiramDinamis(int hst, int jam, int menit) {
+  String jsonSchedules = preferences.getString("sched_data", "");
+  if (jsonSchedules != "") {
+    StaticJsonDocument<1536> doc;
+    DeserializationError error = deserializeJson(doc, jsonSchedules);
+    if (!error && doc.is<JsonArray>()) {
+      JsonArray arr = doc.as<JsonArray>();
+      for (JsonObject v : arr) {
+        int hstMulai = v["hst_mulai"];
+        int hstSelesai = v["hst_selesai"];
+        if (hst >= hstMulai && hst <= hstSelesai) {
+          JsonArray waktuSiram = v["waktu_siram"];
+          for (String t : waktuSiram) {
+            int targetJam = t.substring(0, 2).toInt();
+            int targetMenit = t.substring(3, 5).toInt();
+            if (jam == targetJam && abs(menit - targetMenit) <= 2) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+String dapatkanJadwalSelanjutnyaDinamis(int hst, int jam, int menit) {
+  int waktuSekarang = (jam * 60) + menit;
+  String jsonSchedules = preferences.getString("sched_data", "");
+  if (jsonSchedules != "") {
+    StaticJsonDocument<1536> doc;
+    DeserializationError error = deserializeJson(doc, jsonSchedules);
+    if (!error && doc.is<JsonArray>()) {
+      JsonArray arr = doc.as<JsonArray>();
+      for (JsonObject v : arr) {
+        int hstMulai = v["hst_mulai"];
+        int hstSelesai = v["hst_selesai"];
+        if (hst >= hstMulai && hst <= hstSelesai) {
+          JsonArray waktuSiram = v["waktu_siram"];
+          int menitTerkecilBesok = 9999;
+          String jadwalBesok = "";
+          
+          for (String t : waktuSiram) {
+            int tj = t.substring(0, 2).toInt();
+            int tm = t.substring(3, 5).toInt();
+            int totalMenitJadwal = (tj * 60) + tm;
+            
+            if (totalMenitJadwal > waktuSekarang) {
+              return t; 
+            }
+            if (totalMenitJadwal < menitTerkecilBesok) {
+              menitTerkecilBesok = totalMenitJadwal;
+              jadwalBesok = t;
+            }
+          }
+          if (jadwalBesok != "") {
+            String res = jadwalBesok;
+            res += " (Besok)";
+            return res;
+          }
+        }
+      }
+    }
+  }
+  return "--:--";
+}
+
 void catatPenyiraman() {
   DateTime now = rtc.now();
   if (tanggalSistemUntukReset != now.day()) {
@@ -247,115 +300,211 @@ void catatPenyiraman() {
   preferences.putString("jamSiram", jamTerakhirSiram); 
 }
 
-// ==========================================
-// FUNGSI HITUNG TARGET ML BERDASARKAN HST
-// ==========================================
-int hitungTargetVolume(int hst) {
-  if (hst == 1) return 156; 
-  else if (hst >= 2 && hst <= 5) return 250;
-  else if (hst >= 6 && hst <= 10) return 300;
-  else if (hst >= 11 && hst <= 17) return 292; 
-  else if (hst >= 18 && hst <= 25) return 219; 
-  else if (hst >= 26 && hst <= 35) return 250;
-  else if (hst >= 36 && hst <= 54) return 250;
-  else if (hst >= 55 && hst <= 59) return 219;
-  else if (hst >= 60 && hst <= 64) return 188; 
-  else if (hst >= 65 && hst <= 79) return 156; 
-  else if (hst >= 80) return 125;
-  return 250; 
-}
-
-// ==========================================
-// --- FUNGSI MANAJEMEN KIPAS HEMAT DAYA ---
-// ==========================================
-// [PERUBAHAN]: Menambahkan parameter 'int jamSekarang' untuk mendeteksi siang/malam
 void kontrolManajemenKipas(float suhuAktual, float lembabAktual, unsigned long waktuSaatIni, int jamSekarang) {
-    if (suhuAktual < 37.0 && lembabAktual < 78.0) {
+    if (suhuAktual < thresholdSuhuAman && lembabAktual < thresholdLembabAman) {
         if (statusKipas != KIPAS_IDLE) {
             digitalWrite(RELAY1, HIGH); 
             statusKipas = KIPAS_IDLE;
-            pesanAntrian = "✅ *Kipas Otomatis MATI*\nSuhu & Kelembaban telah kembali ke batas aman.\nSuhu: " + String(suhuAktual,1) + "°C | Lembab: " + String(lembabAktual,1) + "%";
+            pesanAntrian = "✅ Kipas Otomatis MATI\nSuhu/Lembab kembali normal.";
             kirimPesanSekarang = true;
         }
         return; 
     }
 
-    // Menentukan apakah saat ini malam hari (antara jam 18:00 sore hingga 05:59 pagi)
     bool isMalamHari = (jamSekarang >= 18 || jamSekarang < 6);
+    bool applyCycling = false;
+
+    // --- FIX: Penerapan Field Battery Saver dari Web ---
+    if (batterySaverStatus) {
+        if (batterySaverTime == "full_day") applyCycling = true;
+        else if (batterySaverTime == "night_only" && isMalamHari) applyCycling = true;
+    }
 
     switch (statusKipas) {
         case KIPAS_IDLE:
-            if (suhuAktual >= 39.0 || lembabAktual >= 80.0) {
+            if (suhuAktual >= thresholdSuhuKipas || lembabAktual >= thresholdLembabKipas) {
                 digitalWrite(RELAY1, LOW); 
                 waktuMulaiKipas = waktuSaatIni;
-                statusKipas = KIPAS_ON_CYCLE;
-                pesanAntrian = "⚠️ *Kipas Otomatis NYALA*\nKondisi ekstrem terdeteksi.\nSuhu: " + String(suhuAktual,1) + "°C | Lembab: " + String(lembabAktual,1) + "%";
+                statusKipas = KIPAS_ON_CYCLE; 
+                pesanAntrian = "⚠️ Kipas Otomatis NYALA\nTreshold Terlewati. S:";
+                pesanAntrian += String(suhuAktual, 1);
+                pesanAntrian += "°C | L:";
+                pesanAntrian += String(lembabAktual, 1);
+                pesanAntrian += "%";
                 kirimPesanSekarang = true;
             }
             break;
-
         case KIPAS_ON_CYCLE:
-            // Jeda dieksekusi HANYA JIKA MALAM HARI setelah kipas menyala selama durasi ON
-            if (isMalamHari && (waktuSaatIni - waktuMulaiKipas >= DURASI_KIPAS_ON)) {
+            if (applyCycling && (waktuSaatIni - waktuMulaiKipas >= DURASI_KIPAS_ON)) {
                 digitalWrite(RELAY1, HIGH); 
                 waktuMulaiKipas = waktuSaatIni;
                 statusKipas = KIPAS_OFF_CYCLE;
-                pesanAntrian = "🛑 *Kipas JEDA (Hemat Baterai)*\nSiklus ON 2 jam selesai. Kipas diistirahatkan selama 1 jam.";
+                pesanAntrian = "🛑 Kipas JEDA (Battery Saver Aktif)";
                 kirimPesanSekarang = true;
             }
             break;
-
         case KIPAS_OFF_CYCLE:
-            // Kipas menyala kembali jika jeda OFF selesai, ATAU jika hari sudah pagi
-            if (!isMalamHari || (waktuSaatIni - waktuMulaiKipas >= DURASI_KIPAS_OFF)) {
+            if (!applyCycling || (waktuSaatIni - waktuMulaiKipas >= DURASI_KIPAS_OFF)) {
                 digitalWrite(RELAY1, LOW); 
                 waktuMulaiKipas = waktuSaatIni;
                 statusKipas = KIPAS_ON_CYCLE;
-                pesanAntrian = "💨 *Kipas Otomatis NYALA KEMBALI*\nSuhu/Lembab masih di atas batas aman.";
+                pesanAntrian = "💨 Kipas Otomatis NYALA KEMBALI.";
                 kirimPesanSekarang = true;
             }
             break;
     }
 }
 
-// ==========================================
-// FUNGSI MEMBACA PESAN TELEGRAM
-// ==========================================
-void handleNewMessages(int numNewMessages) {
-  for (int i = 0; i < numNewMessages; i++) {
-    String chat_id = String(bot.messages[i].chat_id);
-    if (chat_id != CHAT_ID) { bot.sendMessage(chat_id, "Akses ditolak!", ""); continue; }
-    String text = bot.messages[i].text;
-
-    if (text == "/start") {
-      String welcome; welcome.reserve(500); 
-      welcome = "Sistem Greenhouse Melon Capstone!\n\n";
-      welcome += "Pilih Mode Operasi:\n";
-      welcome += "/auto - Mode Otomatis\n";
-      welcome += "/jadwal - Mode Terjadwal\n";
-      welcome += "/manual - Mode Manual\n\n";
+// =========================================================================
+// STREAM ACTUATOR DARI COMMANDS WEB DASHBOARD (DIUBAH UNTUK PEMBERSIHAN RIWAYAT)
+// =========================================================================
+void streamActuatorCallback(FirebaseStream data) {
+  String path = data.streamPath();
+  String dataType = data.dataType();
+  
+  if (dataType == "json") {
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, data.jsonString());
+    
+    if (!error) {
+      JsonObject root = doc.as<JsonObject>();
       
-      welcome += "--- Manajemen Tanam ---\n";
-      welcome += "Ubah tanggal tanam dengan format:\n";
-      welcome += "/settanggal YYYY-MM-DD\n";
-      welcome += "(Contoh: /settanggal 2026-06-19)\n\n";
-      
-      welcome += "--- Kalibrasi Pompa ---\n";
-      welcome += "Ketik detik yg dibutuhkan utk 100ml air:\n";
-      welcome += "/kalibrasi [detik] (Contoh: /kalibrasi 33.5)\n\n";
-      
-      welcome += "--- Perintah Lain ---\n";
-      welcome += "/status - Cek kondisi terkini\n";
-      welcome += "/kipas_on | /kipas_off\n";
-      welcome += "/pompa_on | /pompa_off\n";
-      welcome += "/restart - Mulai ulang sistem\n";
-      
-      bot.sendMessage(chat_id, welcome, "");
+      // Jika Firebase mengirimkan single command yang ditaruh di dalam direktori timestamp
+      if (root.containsKey("from") || root.containsKey("timestamp")) {
+        if (root.containsKey("mode")) {
+           String val = root["mode"].as<String>();
+           if (val == "auto") modeSistem = 1;
+           else if (val == "schedule") modeSistem = 2;
+           else if (val == "manual") { modeSistem = 0; statusKipas = KIPAS_IDLE; }
+        }
+        if (root.containsKey("pump") && modeSistem == 0) {
+           bool statusWeb = root["pump"].as<bool>();
+           if (statusWeb && digitalRead(RELAY2) == HIGH) { digitalWrite(RELAY2, LOW); catatPenyiraman(); }
+           else if (!statusWeb) { digitalWrite(RELAY2, HIGH); }
+        }
+        if (root.containsKey("fan") && modeSistem == 0) {
+           digitalWrite(RELAY1, root["fan"].as<bool>() ? LOW : HIGH);
+        }
+        
+       // --- FIX: Tandai spesifik command ini untuk dihapus dari riwayat Firebase ---
+        if (path.length() > 1) {
+          cmdToDelete = "/commands/";
+          cmdToDelete += DEVICE_ID;
+          cmdToDelete += path;
+          pendingCmdDelete = true;
+        }
+      } 
+      else {
+        // Jika Firebase mengirimkan banyak riwayat command sekaligus (saat ESP32 baru boot/reconnect)
+        unsigned long maxTs = 0;
+        JsonObject newestCmd;
+        
+        for (JsonPair kv : root) {
+          if (kv.value().is<JsonObject>()) {
+            unsigned long ts = String(kv.key().c_str()).toInt();
+            if (ts > maxTs) {
+              maxTs = ts;
+              newestCmd = kv.value().as<JsonObject>();
+            }
+          }
+        }
+        
+        // --- FIX: Hanya eksekusi jika command tersebut adalah yang paling baru (Highest Timestamp) ---
+        if (maxTs > lastProcessedCmd) {
+          lastProcessedCmd = maxTs;
+          if (newestCmd.containsKey("mode")) {
+             String val = newestCmd["mode"].as<String>();
+             if (val == "auto") modeSistem = 1;
+             else if (val == "schedule") modeSistem = 2;
+             else if (val == "manual") { modeSistem = 0; statusKipas = KIPAS_IDLE; }
+          }
+          if (newestCmd.containsKey("pump") && modeSistem == 0) {
+             bool statusWeb = newestCmd["pump"].as<bool>();
+             if (statusWeb && digitalRead(RELAY2) == HIGH) { digitalWrite(RELAY2, LOW); catatPenyiraman(); }
+             else if (!statusWeb) { digitalWrite(RELAY2, HIGH); }
+          }
+          if (newestCmd.containsKey("fan") && modeSistem == 0) {
+             digitalWrite(RELAY1, newestCmd["fan"].as<bool>() ? LOW : HIGH);
+          }
+          
+          // --- FIX: Bersihkan seluruh node /commands agar riwayat lama musnah ---
+          cmdToDelete = "/commands/" DEVICE_ID;
+          pendingCmdDelete = true;
+        }
+      }
     }
-    else if (text.startsWith("/settanggal ")) {
-      String dateStr = text.substring(12);
-      dateStr.trim();
-      if (dateStr.length() == 10 && dateStr.charAt(4) == '-' && dateStr.charAt(7) == '-') {
+  }
+}
+
+// =========================================================================
+// STREAM CONFIG DARI WEB DASHBOARD
+// =========================================================================
+void streamConfigCallback(FirebaseStream data) {
+  String path = data.streamPath();
+  String dataType = data.dataType();
+
+  if (dataType == "json") {
+    StaticJsonDocument<1536> doc;
+    DeserializationError error = deserializeJson(doc, data.jsonString());
+    if (!error) {
+      // Tangkap khusus jika Single Update diarahkan ke /pumpCalibration
+      if (path == "/pumpCalibration") {
+         if (doc.containsKey("mlPerSecond")) debitPompaPerDetik = doc["mlPerSecond"];
+      } 
+      else {
+          // --- FIX: Penyatuan Pembacaan Kalibrasi Pompa ---
+          if (doc.containsKey("pumpCalibration")) {
+             if (doc["pumpCalibration"].containsKey("mlPerSecond")) {
+                 debitPompaPerDetik = doc["pumpCalibration"]["mlPerSecond"];
+             }
+          } else if (doc.containsKey("debit_pompa")) {
+             debitPompaPerDetik = doc["debit_pompa"];
+          }
+          
+          // --- FIX: Membaca Field Auto Restart & Battery Saver dari RTDB ---
+          if (doc.containsKey("auto_restart_status")) autoRestartStatus = doc["auto_restart_status"];
+          if (doc.containsKey("battery_saver_status")) batterySaverStatus = doc["battery_saver_status"];
+          if (doc.containsKey("battery_saver_time")) batterySaverTime = doc["battery_saver_time"].as<String>();
+          if (doc.containsKey("detik_kalibrasi_pompa")) detikKalibrasiPompa = doc["detik_kalibrasi_pompa"];
+          
+          if (doc.containsKey("suhu_kipas_on")) thresholdSuhuKipas = doc["suhu_kipas_on"];
+          if (doc.containsKey("suhu_kipas_off")) thresholdSuhuAman = doc["suhu_kipas_off"];
+          if (doc.containsKey("lembab_kipas_on")) thresholdLembabKipas = doc["lembab_kipas_on"];
+          if (doc.containsKey("lembab_kipas_off")) thresholdLembabAman = doc["lembab_kipas_off"];
+          
+          if (doc.containsKey("tanah_pompa_on")) batasTanahKering = doc["tanah_pompa_on"];
+          if (doc.containsKey("tanah_pompa_off")) batasTanahBasah = doc["tanah_pompa_off"];
+          
+          if (doc.containsKey("kipas_siklus_on")) DURASI_KIPAS_ON = doc["kipas_siklus_on"].as<unsigned long>() * 60000UL;
+          if (doc.containsKey("kipas_siklus_off")) DURASI_KIPAS_OFF = doc["kipas_siklus_off"].as<unsigned long>() * 60000UL;
+
+          if (doc.containsKey("auto_restart_time")) {
+            String timeStr = doc["auto_restart_time"].as<String>();
+            if (timeStr.length() >= 5) {
+              jamAutoRestart = timeStr.substring(0, 2).toInt();
+              menitAutoRestart = timeStr.substring(3, 5).toInt();
+            }
+          }
+          if (doc.containsKey("schedules")) {
+            String schedStr;
+            serializeJson(doc["schedules"], schedStr);
+            preferences.putString("sched_data", schedStr);
+          }
+      }
+      
+      preferences.putFloat("thSuhu", thresholdSuhuKipas);
+      preferences.putFloat("thLembab", thresholdLembabKipas);
+      preferences.putFloat("debitPompa", debitPompaPerDetik);
+      preferences.putInt("rstJam", jamAutoRestart);
+      preferences.putInt("rstMenit", menitAutoRestart);
+      
+      Serial.println("✅ Sinkronisasi Konfigurasi Penuh dari Web Berhasil Diterapkan!");
+    }
+  } 
+  else {
+    if (path == "/plantingDate") {
+      String dateStr = String(data.stringData().c_str());
+      if (dateStr.length() == 10) {
         TAHUN_TANAM = dateStr.substring(0, 4).toInt();
         BULAN_TANAM = dateStr.substring(5, 7).toInt();
         TANGGAL_TANAM = dateStr.substring(8, 10).toInt();
@@ -364,129 +513,86 @@ void handleNewMessages(int numNewMessages) {
         preferences.putInt("tanggal", TANGGAL_TANAM);
         penyiramanKe = 0;
         jamTerakhirSiram = "--:--";
-        jamTerakhirDisiram = -1; 
+        jamTerakhirDisiram = -1;
         preferences.putInt("siramKe", penyiramanKe);
         preferences.putString("jamSiram", jamTerakhirSiram);
         preferences.putInt("jamDisiram", jamTerakhirDisiram);
-        bot.sendMessage(chat_id, "✅ Tanggal Tanam diubah menjadi: " + dateStr + "\n🔄 Histori di-reset!", "");
-      } else {
-        bot.sendMessage(chat_id, "⚠️ Format salah!\nGunakan format YYYY-MM-DD", "");
       }
-    }
-    else if (text.startsWith("/kalibrasi ")) {
-      String detikStr = text.substring(11); 
-      detikStr.trim();
-      float detikMasuk = detikStr.toFloat();
-      if (detikMasuk > 0) {
-        debitPompaPerDetik = 100.0 / detikMasuk;
-        preferences.putFloat("debitPompa", debitPompaPerDetik);
-        String balas = "✅ Kalibrasi Pompa Berhasil!\n";
-        balas += "Waktu 100ml : " + String(detikMasuk, 1) + " detik\n";
-        balas += "Debit Baru : " + String(debitPompaPerDetik, 2) + " ml/detik\n";
-        bot.sendMessage(chat_id, balas, "");
-      } else {
-        bot.sendMessage(chat_id, "⚠️ Format salah! Contoh: /kalibrasi 33.5", "");
-      }
-    }
-    else if (text == "/status") {
-      // Ambil waktu saat ini untuk memprediksi jadwal berikutnya
-      DateTime nowStatus = rtc.now();
-      String infoSelanjutnya = "-";
-      if (modeSistem == 2) {
-        infoSelanjutnya = dapatkanJadwalSelanjutnya(hst_sekarang, nowStatus.hour(), nowStatus.minute());
-      } else {
-        infoSelanjutnya = (modeSistem == 1) ? "Menunggu Sensor" : "Mode Manual";
-      }
-
-      String status; status.reserve(500); 
-      status = "📊 Status Greenhouse:\n\n";
-      status += "📅 Tgl Tanam: " + String(TANGGAL_TANAM) + "/" + String(BULAN_TANAM) + "/" + String(TAHUN_TANAM) + "\n";
-      status += "🌱 Usia: " + String(hst_sekarang) + " HST\n";
-      status += "🎯 Target Siram: " + String(targetVolumeML) + " ml\n";
-      status += "⚙️ Debit Pompa: " + String(debitPompaPerDetik, 2) + " ml/dtk\n";
-      status += "💧 Terakhir Siram: " + jamTerakhirSiram + " (Ke-" + String(penyiramanKe) + ")\n";
-      status += "🔜 Selanjutnya: " + infoSelanjutnya + "\n\n"; // <--- INFO BARU MUNCUL DI SINI
-      
-      status += "🌡 Suhu: " + String(suhu, 1) + " °C\n";
-      status += "💧 Lembab Udara: " + String(lembab, 1) + " %\n";
-      status += "🧬 Angka VPD: " + String(vpd, 2) + " kPa\n";
-      status += "🌱 L.Tanah A: " + String(persenSoilA) + " % | B: " + String(persenSoilB) + " %\n";
-      
-      // --- LOGIKA STATUS DAYA ---
-      String statusDaya = "";
-      if (teganganAki > 13.2) {
-        statusDaya = "Charging ☀️";
-      } else if (teganganAki >= 11.6) {
-        statusDaya = "Discharge 🔋";
-      } else {
-        statusDaya = "PLN 🔌";
-      }
-      
-      status += "🔋 Tegangan Aki: " + String(teganganAki, 1) + " V (" + String(persenAki) + "%)\n";
-      status += "⚡ Status Daya: " + statusDaya + "\n\n";
-      
-      String namaMode = (modeSistem == 1) ? "OTOMATIS (SENSOR)" : (modeSistem == 2) ? "TERJADWAL" : "MANUAL";
-      status += "⚙️ Mode: " + namaMode + "\n";
-      status += "💨 Kipas: " + String(digitalRead(RELAY1) == LOW ? "NYALA" : "MATI") + "\n";
-      status += "💦 Pompa: " + String(digitalRead(RELAY2) == LOW ? "NYALA" : "MATI") + "\n";
-      status += "📶 Wi-Fi: " + WiFi.SSID() + "\n";
-      bot.sendMessage(chat_id, status, "");
-    }
-    else if (text == "/auto") { modeSistem = 1; bot.sendMessage(chat_id, "✅ Sistem diubah ke Mode SENSOR.", ""); }
-    else if (text == "/jadwal") { modeSistem = 2; bot.sendMessage(chat_id, "⏱ Sistem diubah ke Mode JADWAL (SOP Nutrisi).", ""); }
-    else if (text == "/manual") { modeSistem = 0; statusKipas = KIPAS_IDLE; bot.sendMessage(chat_id, "⚙️ Sistem diubah ke Mode MANUAL.", ""); }
-    
-    else if (text == "/kipas_on") { if(modeSistem == 0) { digitalWrite(RELAY1, LOW); bot.sendMessage(chat_id, "💨 Kipas NYALA.", ""); } else { bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); } }
-    else if (text == "/kipas_off") { if(modeSistem == 0) { digitalWrite(RELAY1, HIGH); bot.sendMessage(chat_id, "🛑 Kipas MATI.", ""); } else { bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); } }
-    else if (text == "/pompa_on") { 
-      if(modeSistem == 0) { 
-        if (digitalRead(RELAY2) == HIGH) { digitalWrite(RELAY2, LOW); catatPenyiraman(); }
-        bot.sendMessage(chat_id, "💦 Pompa NYALA.", ""); 
-      } else { bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); } 
-    }
-    else if (text == "/pompa_off") { if(modeSistem == 0) { digitalWrite(RELAY2, HIGH); bot.sendMessage(chat_id, "🛑 Pompa MATI.", ""); } else { bot.sendMessage(chat_id, "⚠️ Ubah ke /manual dulu!", ""); } }
-    
-    // --- [PERUBAHAN FIX BOOTLOOP] ---
-    else if (text == "/restart") {
-      bot.sendMessage(chat_id, "🔄 Memulai ulang sistem (Restart) dari jarak jauh...\nMohon tunggu sekitar 10 detik hingga sistem kembali online.", "");
-      flagRestart = true; // Hanya memberikan tanda (flag), ESP32 tidak langsung dimatikan di sini
     }
   }
 }
 
-// ==========================================
-// TASK KHUSUS CORE 0 (TELEGRAM SAJA)
-// ==========================================
-void TaskTelegramCode( void * pvParameters ) {
+void streamTimeoutCallback(bool timeout) {}
+
+// =========================================================================
+// TASK CORE 0: ENGINGE FIREBASE RTDB NON-BLOCKING (LOGS, TELEMETRI & STREAM)
+// =========================================================================
+void TaskFirebaseCode( void * pvParameters ) {
   for(;;) {
-    if (!isOfflineMode && WiFi.status() == WL_CONNECTED) {
-      // KODE BARU (ANTI-DOUBLE SEND):
+    if (!isOfflineMode && WiFi.status() == WL_CONNECTED && Firebase.ready()) {
+      
+      // --- FIX: Eksekusi hapus riwayat perintah lama ---
+      if (pendingCmdDelete && cmdToDelete != "") {
+        Firebase.RTDB.deleteNode(&fbdoStore, cmdToDelete.c_str());
+        pendingCmdDelete = false;
+        cmdToDelete = "";
+      }
+      
       if (kirimPesanSekarang && pesanAntrian != "") {
-        // 1. Kunci dan amankan pesan ke memori lokal
         String pesanDikirim = pesanAntrian; 
-        
-        // 2. Segera kosongkan antrean global agar Core 1 aman
         pesanAntrian = ""; 
         kirimPesanSekarang = false; 
+
+        FirebaseJson jsonLog;
+        jsonLog.set("message", pesanDikirim.c_str());
         
-        // 3. Eksekusi pengiriman pesan (bebas hambatan/delay)
-        bot.sendMessage(CHAT_ID, pesanDikirim, "Markdown"); 
+        String tsLog = String(rtc.now().unixtime());
+        tsLog += "000";
+        jsonLog.set("timestamp", tsLog.c_str());
+
+        Firebase.RTDB.pushJSON(&fbdoStore, "/logs/" DEVICE_ID, &jsonLog);
       }
       
-      int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
-      while (numNewMessages) {
-        handleNewMessages(numNewMessages);
-        // Di baris inilah server Telegram diberitahu bahwa pesan telah selesai dibaca
-        numNewMessages = bot.getUpdates(bot.last_message_received + 1); 
+      unsigned long waktuSaatIni = millis();
+      if (waktuSaatIni - waktuSebelumnyaTelemetri >= jedaKirimTelemetri) {
+        waktuSebelumnyaTelemetri = waktuSaatIni;
+
+        FirebaseJson jsonTelemetry, jsonSensors, jsonStatus, jsonActuators;
+
+        jsonSensors.set("temperature", isnan(suhu) ? 0.0 : suhu);
+        jsonSensors.set("humidity", isnan(lembab) ? 0.0 : lembab);
+        jsonSensors.set("vpd", vpd);
+        jsonSensors.set("soilMoistureA", persenSoilA);
+        jsonSensors.set("soilMoistureB", persenSoilB);
+        jsonSensors.set("batteryVoltage", round(teganganAki * 10) / 10.0);
+        jsonSensors.set("rssi", WiFi.RSSI());
+        jsonSensors.set("wifi_ssid", WiFi.SSID());
+        jsonSensors.set("wifi_ip", WiFi.localIP().toString().c_str());
+        
+        String tsSensors = String(rtc.now().unixtime());
+        tsSensors += "000";
+        jsonSensors.set("timestamp", tsSensors.c_str());
+
+        jsonStatus.set("uptime", millis() / 1000);
+        jsonStatus.set("jam_terakhir_siram", jamTerakhirSiram.c_str());
+        jsonStatus.set("penyiraman_ke", penyiramanKe);
+
+        jsonActuators.set("mode", modeSistem == 1 ? "auto" : modeSistem == 2 ? "schedule" : "manual");
+        jsonActuators.set("pump", digitalRead(RELAY2) == LOW);
+        jsonActuators.set("fan", digitalRead(RELAY1) == LOW);
+
+        jsonTelemetry.set("sensors", jsonSensors);
+        jsonTelemetry.set("status", jsonStatus);
+        jsonTelemetry.set("actuators", jsonActuators);
+
+        if (Firebase.RTDB.updateNode(&fbdoStore, "/live/" DEVICE_ID, &jsonTelemetry)) {
+          Firebase.RTDB.pushJSON(&fbdoStore, "/history/" DEVICE_ID, &jsonSensors);
+        }
       }
-      
-      // --- [PERUBAHAN FIX BOOTLOOP] EKSEKUSI RESTART YANG AMAN ---
-      if (flagRestart) {
-        delay(10000); // Waktu ekstra 10 detik untuk mengatasi Wi-Fi lambat
-        ESP.restart();
-      }
+
+      if (flagRestart) { delay(5000); ESP.restart(); }
     }
-    vTaskDelay(3000 / portTICK_PERIOD_MS); 
+    vTaskDelay(100 / portTICK_PERIOD_MS);
   }
 }
 
@@ -497,7 +603,15 @@ void setup() {
   TAHUN_TANAM = preferences.getInt("tahun", 2026);
   BULAN_TANAM = preferences.getInt("bulan", 5);
   TANGGAL_TANAM = preferences.getInt("tanggal", 20);
-  debitPompaPerDetik = preferences.getFloat("debitPompa", 3.0); 
+  debitPompaPerDetik = preferences.getFloat("debitPompa", 3.0);  
+  thresholdSuhuKipas = preferences.getFloat("thSuhu", 39.0);
+  thresholdLembabKipas = preferences.getFloat("thLembab", 80.0);
+  
+  batasTanahKering = preferences.getInt("thTanahOn", 45);
+  batasTanahBasah = preferences.getInt("thTanahOff", 75);
+
+  jamAutoRestart = preferences.getInt("rstJam", 2);
+  menitAutoRestart = preferences.getInt("rstMenit", 0);
   penyiramanKe = preferences.getInt("siramKe", 0);
   tanggalSistemUntukReset = preferences.getInt("tglReset", -1);
   jamTerakhirSiram = preferences.getString("jamSiram", "--:--");
@@ -508,7 +622,7 @@ void setup() {
 
   pinMode(RELAY1, OUTPUT);
   pinMode(RELAY2, OUTPUT);
-  digitalWrite(RELAY1, HIGH); 
+  digitalWrite(RELAY1, HIGH);  
   digitalWrite(RELAY2, HIGH);
 
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { for(;;); }
@@ -517,85 +631,90 @@ void setup() {
   display.setTextSize(1);
   display.setTextColor(WHITE);
   display.setCursor(10, 20); display.print("Mencari Wi-Fi...");
-  display.setCursor(0, 40); display.print("GreenFlow-Config");
   display.display();
 
   WiFiManager wm;
   wm.setConfigPortalTimeout(180); 
 
   if (!wm.autoConnect("GreenFlow-Config")) {
-    Serial.println("Gagal terhubung Wi-Fi atau Timeout! Menjalankan mode Offline...");
     isOfflineMode = true; 
-    display.clearDisplay();
-    display.setCursor(5, 20); display.print("Wi-Fi Gagal!");
-    display.setCursor(5, 40); display.print("Mode OFFLINE Aktif");
-    display.display();
     delay(3000);
   } else {
-    Serial.println("Koneksi Wi-Fi Sukses!");
     isOfflineMode = false;
-    secured_client.setCACert(TELEGRAM_CERTIFICATE_ROOT); 
-    bot.sendMessage(CHAT_ID, "🚀 Sistem GreenFlow Online! /start", "");
+    
+    configfb.database_url = FIREBASE_HOST;
+    configfb.signer.tokens.legacy_token = FIREBASE_AUTH;
+    
+    Firebase.reconnectWiFi(true);
+    Firebase.begin(&configfb, &auth);
+
+    if (Firebase.RTDB.beginStream(&fbdoStreamActuators, "/commands/" DEVICE_ID)) {
+      Firebase.RTDB.setStreamCallback(&fbdoStreamActuators, streamActuatorCallback, streamTimeoutCallback);
+    }
+    if (Firebase.RTDB.beginStream(&fbdoStreamConfig, "/config/" DEVICE_ID)) {
+      Firebase.RTDB.setStreamCallback(&fbdoStreamConfig, streamConfigCallback, streamTimeoutCallback);
+    }
+    
+    pesanAntrian = "🚀 Sistem GreenFlow Online! Semua parameter sinkron penuh dengan Web.";
+    kirimPesanSekarang = true;
   }
 
-  xTaskCreatePinnedToCore(TaskTelegramCode, "TaskTelegram", 10000, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(TaskFirebaseCode, "TaskFirebase", 10000, NULL, 1, NULL, 0);
 
   dht.begin(); 
   rtc.begin();
-
-  display.clearDisplay(); display.setCursor(30, 20); display.print("Monitoring"); display.setCursor(15, 35); display.print("Green House Melon"); display.display(); delay(2000); 
-  display.clearDisplay(); display.drawBitmap(0, 0, epd_bitmap_logo, 128, 64, WHITE); display.display(); delay(3000); 
 }
 
-// ==========================================
-// CORE 1 (MURNI SENSOR & LAYAR)
-// ==========================================
 void loop() {
   unsigned long waktuSekarang = millis();
 
   if (waktuSekarang - waktuSebelumnyaWiFi >= jedaCekWiFi) {
+    waktuSekarang = millis(); // Refresh waktu setelah blocking wifi
     waktuSebelumnyaWiFi = waktuSekarang;
     if (WiFi.status() != WL_CONNECTED) {
-      if (!isOfflineMode) { isOfflineMode = true; }
+      if (!isOfflineMode) isOfflineMode = true;
       WiFi.reconnect(); 
-    } else {
-      if (isOfflineMode) {
-        isOfflineMode = false; 
-        pesanAntrian = "🔄 Sistem GreenFlow kembali ONLINE!";
-        kirimPesanSekarang = true;
-      }
+    } else if (isOfflineMode) {
+      isOfflineMode = false; 
+      pesanAntrian = "🔄 Jaringan Pulih. Sistem terhubung kembali.";
+      kirimPesanSekarang = true;
     }
   }
 
-  // --- LOGIKA POMPA TERJADWAL ---
+  // --- LOGIKA POMPA AIR ---
   if (modeSistem == 2 && isPompaTerjadwalMenyala) {
     unsigned long durasiSiramMS = ((targetVolumeML / debitPompaPerDetik) * 1000) + 2000;
-    
     if (waktuSekarang - waktuMulaiPompaTerjadwal >= durasiSiramMS) {
       isPompaTerjadwalMenyala = false;
       digitalWrite(RELAY2, HIGH); 
-      pesanAntrian = "✅ Jadwal Selesai. " + String(targetVolumeML) + " ml diberikan.";
+      
+      pesanAntrian = "✅ Pengairan SOP Selesai. ";
+      pesanAntrian += String(targetVolumeML);
+      pesanAntrian += " ml terdistribusi.";
       kirimPesanSekarang = true;
     }
-    
     if (!pesanJadwalTerkirim && (waktuSekarang - waktuMulaiPompaTerjadwal >= 3000)) {
-      pesanAntrian = "⏱ Jadwal Dimulai (HST " + String(hst_sekarang) + ").\nTarget: " + String(targetVolumeML) + " ml.";
+      pesanAntrian = "⏱ Memulai Pengairan SOP (HST ";
+      pesanAntrian += String(hst_sekarang);
+      pesanAntrian += "). Target Dosis: ";
+      pesanAntrian += String(targetVolumeML);
+      pesanAntrian += " ml.";
       kirimPesanSekarang = true;
       pesanJadwalTerkirim = true; 
     }
   }
 
-  // --- PEMBACAAN SENSOR 2 DETIK SEKALI ---
+  // --- PEMBACAAN SENSOR & IMPLEMENTASI RULES BUDIDAYA ---
   if (waktuSekarang - waktuSebelumnyaSensor >= jedaUpdateSensor) {
     waktuSebelumnyaSensor = waktuSekarang;
 
     DateTime now = rtc.now();
     int jamSekarang = now.hour();
 
-    // FITUR AUTO-RESTART (PEMBERSIHAN MEMORI SETIAP HARI JAM 05:00)
-    if (now.hour() == 2 && now.minute() == 0) {
+    // --- FIX: Penerapan Field Auto Restart Status dari Web ---
+    if (autoRestartStatus && now.hour() == jamAutoRestart && now.minute() == menitAutoRestart) {
       if (millis() > 300000) {
-        pesanAntrian = "🔄 *Maintenance Sistem*\nMelakukan Auto-Restart rutin harian untuk menyegarkan memori RAM. Sistem akan kembali online dalam beberapa detik...";
+        pesanAntrian = "🔄 Melakukan penyegaran RAM rutin harian.";
         kirimPesanSekarang = true;
         delay(10000); 
         ESP.restart(); 
@@ -606,7 +725,8 @@ void loop() {
     TimeSpan selisihWaktu = now - tglTanam;
     hst_sekarang = selisihWaktu.days() + 1; 
     if (hst_sekarang < 1) hst_sekarang = 1; 
-    targetVolumeML = hitungTargetVolume(hst_sekarang);
+    
+    targetVolumeML = hitungTargetVolumeDinamis(hst_sekarang);
 
     suhu = dht.readTemperature();
     lembab = dht.readHumidity();
@@ -614,103 +734,87 @@ void loop() {
     persenSoilB = constrain(map(analogRead(SOIL_PIN_B), BATAS_KERING, BATAS_BASAH, 0, 100), 0, 100);
 
     int nilaiADC_Volt = analogRead(VOLT_PIN);
-    float teganganAkiMentah = (nilaiADC_Volt / 4095.0) * 3.3 * faktorKalibrasi;
+    float textTeganganAKI = (nilaiADC_Volt / 4095.0) * 3.3 * faktorKalibrasi; 
 
     if (pertamaKaliBacaAki) {
-      teganganAkiSmoothed = teganganAkiMentah; 
+      teganganAkiSmoothed = textTeganganAKI;
       pertamaKaliBacaAki = false;
     } else {
-      teganganAkiSmoothed = (teganganAkiMentah * 0.05) + (teganganAkiSmoothed * 0.95);
+      teganganAkiSmoothed = (textTeganganAKI * 0.05) + (teganganAkiSmoothed * 0.95);
     }
     
     teganganAki = teganganAkiSmoothed;
     int teganganInt = round(teganganAki * 100); 
     persenAki = constrain(map(teganganInt, 1160, 1280, 0, 100), 0, 100);
 
-    // ======================================================
-    // [BARU] FITUR ANALISIS VPD, PERINGATAN BATERAI & REKAP
-    // ======================================================
-    
-    // 1. MENGHITUNG VPD & PENCATATAN SUHU
     if (!isnan(suhu) && !isnan(lembab)) {
       float svp = 0.61078 * exp((17.27 * suhu) / (suhu + 237.3));
       float avp = svp * (lembab / 100.0);
       vpd = svp - avp; 
-      
       if (suhu > suhuMax) suhuMax = suhu;
       if (suhu < suhuMin) suhuMin = suhu;
     }
 
-    // 2. PERINGATAN BATERAI KRITIS
     if (teganganAki < 11.5 && !peringatanAkiTerkirim && teganganAki > 5.0) {
-      pesanAntrian = "⚠️ *PERINGATAN DAYA KRITIS* ⚠️\nTegangan aki turun hingga " + String(teganganAki, 1) + "V.\nMohon periksa sistem kelistrikan (Panel Surya / ATS)!";
+      pesanAntrian = "⚠️ ALERT: Tegangan baterai aki kritis (";
+      pesanAntrian += String(teganganAki, 1);
+      pesanAntrian += "V)!";
       kirimPesanSekarang = true;
       peringatanAkiTerkirim = true; 
     } else if (teganganAki >= 12.0) {
       peringatanAkiTerkirim = false; 
     }
 
-    // 3. LAPORAN HARIAN OTOMATIS (Setiap jam 18:00)
     if (now.hour() == 18 && now.minute() == 0) {
       if (!laporanTerkirim) {
         int totalAirSatuSiklus = targetVolumeML * penyiramanKe; 
-        
-        pesanAntrian = "📝 *REKAP HARIAN GREENFLOW* (HST " + String(hst_sekarang) + ")\n\n";
-        pesanAntrian += "🌡 Suhu Tertinggi: " + String(suhuMax, 1) + " °C\n";
-        pesanAntrian += "🌡 Suhu Terendah : " + String(suhuMin, 1) + " °C\n";
-        pesanAntrian += "💦 Total Siram   : " + String(penyiramanKe) + " kali\n";
-        pesanAntrian += "💧 Estimasi Air  : " + String(totalAirSatuSiklus) + " ml\n\n";
-        pesanAntrian += "Selamat beristirahat! 🌙";
+        pesanAntrian = "📝 REKAP LOG HARIAN (HST ";
+        pesanAntrian += String(hst_sekarang);
+        pesanAntrian += ")\nSuhu Max: ";
+        pesanAntrian += String(suhuMax, 1);
+        pesanAntrian += "°C\nTotal Siram: ";
+        pesanAntrian += String(penyiramanKe);
+        pesanAntrian += " kali (";
+        pesanAntrian += String(totalAirSatuSiklus);
+        pesanAntrian += "ml)";
         
         kirimPesanSekarang = true;
-        laporanTerkirim = true; 
+        laporanTerkirim = true;  
       }
     } 
-    // Reset variabel rekap di tengah malam (Jam 00:00)
     else if (now.hour() == 0 && now.minute() == 0) {
-      suhuMax = 0.0;
-      suhuMin = 100.0;
-      laporanTerkirim = false;
+      suhuMax = 0.0; suhuMin = 100.0; laporanTerkirim = false;
     }
-    // ======================================================
 
-    // ======================================================
-    // EKSEKUSI LOGIKA KIPAS & POMPA BERDASARKAN MODE
-    // ======================================================
     if (modeSistem == 1 || modeSistem == 2) { 
       if (!isnan(suhu) && !isnan(lembab)) {
-         // Memasukkan variabel jamSekarang agar sistem tahu siang/malam
          kontrolManajemenKipas(suhu, lembab, waktuSekarang, jamSekarang);
       }
       
-      if (modeSistem == 1) {
-        if (persenSoilA < 45 || persenSoilB < 45) {
+      if (modeSistem == 1) { 
+        if (persenSoilA < batasTanahKering || persenSoilB < batasTanahKering) {
           if (digitalRead(RELAY2) == HIGH) { 
-            digitalWrite(RELAY2, LOW);
-            catatPenyiraman();
-            pesanAntrian = "💦 Pompa otomatis NYALA (Tanah kering)";
+            digitalWrite(RELAY2, LOW); catatPenyiraman();
+            pesanAntrian = "💦 Pompa otomatis NYALA (Tanah kering di bawah batas)";
             kirimPesanSekarang = true;
           }
-        } else if (persenSoilA > 75 && persenSoilB > 75) {
+        } else if (persenSoilA > batasTanahBasah && persenSoilB > batasTanahBasah) {
           if (digitalRead(RELAY2) == LOW) {
             digitalWrite(RELAY2, HIGH);  
-            pesanAntrian = "🛑 Pompa otomatis MATI (Tanah sudah basah)";
+            pesanAntrian = "🛑 Pompa otomatis MATI (Tanah telah basah)";
             kirimPesanSekarang = true;
           }
         }
       } 
-      else if (modeSistem == 2) {
-        bool waktunyaSiram = cekJadwalSiram(hst_sekarang, jamSekarang, now.minute());
-        
+      else if (modeSistem == 2) { 
+        bool waktunyaSiram = cekJadwalSiramDinamis(hst_sekarang, jamSekarang, now.minute());
         if (waktunyaSiram) {
           if (jamTerakhirDisiram != jamSekarang) {
             jamTerakhirDisiram = jamSekarang;
             preferences.putInt("jamDisiram", jamTerakhirDisiram);
-            
             isPompaTerjadwalMenyala = true;
             waktuMulaiPompaTerjadwal = millis();
             pesanJadwalTerkirim = false; 
-            
             digitalWrite(RELAY2, LOW); 
             catatPenyiraman(); 
           }
@@ -720,19 +824,14 @@ void loop() {
       isPompaTerjadwalMenyala = false;
     }
 
-    // --- PENGELOLAAN LAYAR OLED ---
     if (waktuSekarang - waktuSebelumnyaHalaman >= jedaGantiLayar) {
-      waktuSekarang = millis();
       waktuSebelumnyaHalaman = waktuSekarang;
       halamanAktif++;
       if (halamanAktif > 6) halamanAktif = 0; 
-      
-      if (halamanAktif >= 3) jedaGantiLayar = 5000;  
-      else jedaGantiLayar = 10000; 
+      jedaGantiLayar = (halamanAktif >= 3) ? 5000 : 10000; 
     }
 
     display.clearDisplay();
-
     if (halamanAktif == 0) {
       display.setTextSize(1); display.setCursor(20, 0); display.print("WAKTU SAAT INI");
       display.drawLine(0, 9, 128, 9, WHITE);
@@ -740,84 +839,43 @@ void loop() {
       if(now.hour() < 10) display.print('0'); display.print(now.hour(), DEC); display.print(':');
       if(now.minute() < 10) display.print('0'); display.print(now.minute(), DEC);
       display.setTextSize(1); display.setCursor(28, 45); 
-      if(now.day() < 10) display.print('0'); display.print(now.day(), DEC); display.print('/');
-      if(now.month() < 10) display.print('0'); display.print(now.month(), DEC); display.print('/');
-      display.print(now.year(), DEC);
-      if(isOfflineMode) { display.setCursor(110, 0); display.print("[X]"); }
+      display.print(now.day(), DEC); display.print('/'); display.print(now.month(), DEC); display.print('/'); display.print(now.year(), DEC);
     } 
     else if (halamanAktif == 1) {
       display.setTextSize(1); display.setCursor(12, 0); display.print("SUHU & KELEMBABAN");
       display.drawLine(0, 9, 128, 9, WHITE);
-      if (isnan(suhu) || isnan(lembab)) {
-        display.setCursor(10, 30); display.print("Gagal baca sensor!");
-      } else {
-        display.setTextSize(1); display.setCursor(0, 20); display.print("Suhu  : ");
-        display.setTextSize(2); display.print(suhu, 1); 
-        display.setTextSize(1); display.print(" C"); display.drawCircle(113, 20, 2, WHITE); 
-        display.setTextSize(1); display.setCursor(0, 42); display.print("Lembab: ");
-        display.setTextSize(2); display.print(lembab, 1);
-        display.setTextSize(1); display.print(" %");
-      }
+      display.setCursor(0, 20); display.print("Suhu  : "); display.setTextSize(2); display.print(suhu, 1); display.setTextSize(1); display.print(" C");
+      display.setCursor(0, 42); display.print("Lembab: "); display.setTextSize(2); display.print(lembab, 1); display.setTextSize(1); display.print(" %");
     }
     else if (halamanAktif == 2) {
       display.setTextSize(1); display.setCursor(15, 0); display.print("KELEMBABAN TANAH");
       display.drawLine(0, 9, 128, 9, WHITE);
-      display.setTextSize(1); display.setCursor(0, 20); display.print("Sns A: ");
-      display.setTextSize(2); display.print(persenSoilA); display.setTextSize(1); display.print("%");
-      display.setTextSize(1); display.setCursor(0, 45); display.print("Sns B: ");
-      display.setTextSize(2); display.print(persenSoilB); display.setTextSize(1); display.print("%");
+      display.setCursor(0, 20); display.print("Sns A: "); display.setTextSize(2); display.print(persenSoilA); display.setTextSize(1); display.print("%");
+      display.setCursor(0, 45); display.print("Sns B: "); display.setTextSize(2); display.print(persenSoilB); display.setTextSize(1); display.print("%");
     }
     else if (halamanAktif == 3) {
       display.setTextSize(1); display.setCursor(22, 0); display.print("MODE & KONEKSI");
-      display.drawLine(0, 9, 128, 9, WHITE);
-      display.setTextSize(2);
-      if (modeSistem == 1) { display.setCursor(15, 20); display.print("OTOMATIS"); } 
-      else if (modeSistem == 2) { display.setCursor(10, 20); display.print("TERJADWAL"); } 
-      else { display.setCursor(30, 20); display.print("MANUAL"); }
-      display.setTextSize(1);
-      if (isOfflineMode) { display.setCursor(15, 48); display.print("Jaringan: OFFLINE"); } 
-      else { display.setCursor(18, 48); display.print("Jaringan: ONLINE"); }
+      display.drawLine(0, 9, 128, 9, WHITE); display.setTextSize(2);
+      if (modeSistem == 1) display.print("OTOMATIS"); 
+      else if (modeSistem == 2) display.print("TERJADWAL"); 
+      else display.print("MANUAL");
     }
     else if (halamanAktif == 4) {
       display.setTextSize(1); display.setCursor(18, 0); display.print("INFO PENYIRAMAN");
       display.drawLine(0, 9, 128, 9, WHITE);
-      display.setTextSize(1); display.setCursor(0, 20); display.print("Terakhir: ");
-      display.setTextSize(2); display.print(jamTerakhirSiram);
-      display.setTextSize(1); display.setCursor(0, 45); 
-      if (penyiramanKe == 0) { display.print("Belum ada penyiraman"); } 
-      else { display.print("Siraman ke-"); display.print(penyiramanKe); display.print(" hari ini"); }
+      display.setCursor(0, 20); display.print("Terakhir: "); display.setTextSize(2); display.print(jamTerakhirSiram);
+      display.setTextSize(1); display.setCursor(0, 45); display.print("Siraman ke-"); display.print(penyiramanKe);
     }
     else if (halamanAktif == 5) {
       display.setTextSize(1); display.setCursor(25, 0); display.print("INFO TANAMAN");
       display.drawLine(0, 9, 128, 9, WHITE);
-      display.setTextSize(1); display.setCursor(0, 20); display.print("Tanam: ");
-      if(TANGGAL_TANAM < 10) display.print('0'); display.print(TANGGAL_TANAM); display.print('/');
-      if(BULAN_TANAM < 10) display.print('0'); display.print(BULAN_TANAM); display.print('/');
-      display.print(TAHUN_TANAM);
-      display.setTextSize(1); display.setCursor(0, 45); display.print("Usia : ");
-      display.setTextSize(2); display.print(hst_sekarang); display.setTextSize(1); display.print(" HST");
+      display.setCursor(0, 20); display.print("Usia : "); display.setTextSize(2); display.print(hst_sekarang); display.setTextSize(1); display.print(" HST");
     }
     else if (halamanAktif == 6) {
       display.setTextSize(1); display.setCursor(15, 0); display.print("INFO SISTEM DAYA");
       display.drawLine(0, 9, 128, 9, WHITE);
-      
-      // Baris 1: Tegangan
-      display.setTextSize(1); display.setCursor(0, 15); display.print("Tegangan: ");
-      display.setTextSize(2); display.print(teganganAki, 1); display.setTextSize(1); display.print(" V");
-      
-      // Baris 2: Kapasitas Baterai
-      display.setTextSize(1); display.setCursor(0, 35); display.print("Baterai : ");
-      display.setTextSize(2); display.print(persenAki); display.setTextSize(1); display.print(" %");
-
-      // Baris 3: Status Daya (PLN/Charge/Discharge)
-      display.setTextSize(1); display.setCursor(0, 55); display.print("Status  : ");
-      if (teganganAki > 13.2) {
-        display.print("CHARGING");
-      } else if (teganganAki >= 11.6) {
-        display.print("DISCHARGE");
-      } else {
-        display.print("PLN");
-      }
+      display.setCursor(0, 15); display.print("Tegangan: "); display.setTextSize(2); display.print(teganganAki, 1); display.setTextSize(1); display.print(" V");
+      display.setCursor(0, 35); display.print("Baterai : "); display.setTextSize(2); display.print(persenAki); display.setTextSize(1); display.print(" %");
     }
     display.display();
   }
